@@ -1,6 +1,6 @@
 import psycopg
 
-from config import settings
+from app.config import settings
 
 
 def get_connection() -> psycopg.Connection:

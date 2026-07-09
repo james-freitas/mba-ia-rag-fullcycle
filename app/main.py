@@ -1,5 +1,5 @@
-from config import settings
-from db import enable_vector_extension, test_connection
+from app.config import settings
+from app.db import enable_vector_extension, test_connection
 
 
 def main() -> None:

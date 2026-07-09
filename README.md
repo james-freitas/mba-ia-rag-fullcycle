@@ -41,8 +41,7 @@ embeddings, retrieval e chamada ao LLM) será implementado nas próximas etapas.
 5. Valide o ambiente:
 
    ```bash
-   cd app
-   python main.py
+   python -m app.main
    ```
 
    Saída esperada:
@@ -54,6 +53,34 @@ embeddings, retrieval e chamada ao LLM) será implementado nas próximas etapas.
    Project setup completed.
    ```
 
+## Knowledge base
+
+Os documentos de exemplo da base de conhecimento ficam em `knowledge_base/`. São
+seis arquivos Markdown em português sobre uma empresa SaaS fictícia (FCAI),
+cobrindo informações da empresa, visão geral do produto, política comercial, SLA de
+suporte, plano Enterprise e faturamento.
+
+Cada arquivo possui metadados no front matter YAML (`title`, `tenant`, `product`,
+`plan`, `doc_type`, `version`, `status`, `visibility`) que servirão de base para
+filtros de RAG.
+
+Esses documentos serão usados nas próximas etapas para ingestão, chunking, indexação
+e retrieval. Nesta etapa ainda não há RAG implementado.
+
+## No-RAG chat
+
+Um chat simples de terminal que chama o modelo diretamente:
+
+```bash
+python -m app.chat
+```
+
+Este chat envia a pergunta direto ao modelo (instanciado com `init_chat_model`, no
+padrão da LangChain v1) e **ainda não usa a base interna** em `knowledge_base/`. A
+resposta é exibida em streaming. Ele serve como linha de base para comparar, nas
+próximas aulas, com as respostas obtidas quando o RAG estiver implementado. Digite
+`exit` ou `quit` para encerrar.
+
 ## Estrutura
 
 ```
@@ -61,6 +88,14 @@ app/
   config.py   # carrega e valida variáveis de ambiente
   db.py       # conexão com Postgres e extensão pgvector
   main.py     # script de validação do ambiente
+  chat.py     # chat de terminal sem RAG (chama o modelo diretamente)
+knowledge_base/
+  company-info.md
+  product-overview.md
+  commercial-policy.md
+  product-support-sla.md
+  enterprise-plan.md
+  billing-policy.md
 docker-compose.yml
 requirements.txt
 .env.example
