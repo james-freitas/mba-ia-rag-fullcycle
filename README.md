@@ -81,6 +81,31 @@ resposta é exibida em streaming. Ele serve como linha de base para comparar, na
 próximas aulas, com as respostas obtidas quando o RAG estiver implementado. Digite
 `exit` ou `quit` para encerrar.
 
+## Full-document context chat
+
+Uma segunda versão do chat que lê **um documento inteiro** da `knowledge_base/` e o
+envia como contexto no prompt:
+
+```bash
+python -m app.context_chat
+```
+
+Por padrão usa `knowledge_base/product-support-sla.md`. É possível trocar o documento
+passando o nome do arquivo como argumento:
+
+```bash
+python -m app.context_chat product-overview.md
+```
+
+O modelo é instruído a responder **somente com base no documento** e a dizer quando o
+documento não tem informação suficiente. Isso **ainda não é RAG**: não há embeddings,
+chunking, retrieval nem pgvector — o documento inteiro simplesmente vai no prompt.
+
+Essa abordagem funciona bem para **documentos pequenos**, mas começa a ficar limitada
+quando há muitos documentos, controle de permissões e versões, custo de tokens (o
+documento inteiro é enviado a cada pergunta) e necessidade de busca seletiva do
+trecho relevante — problemas que o RAG resolve nas próximas etapas.
+
 ## Estrutura
 
 ```
@@ -89,6 +114,7 @@ app/
   db.py       # conexão com Postgres e extensão pgvector
   main.py     # script de validação do ambiente
   chat.py     # chat de terminal sem RAG (chama o modelo diretamente)
+  context_chat.py  # chat com um documento inteiro no prompt (sem RAG)
 knowledge_base/
   company-info.md
   product-overview.md
