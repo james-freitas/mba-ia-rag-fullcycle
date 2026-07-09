@@ -1,0 +1,6 @@
+langchain
+langchain-openai
+langchain-postgres
+psycopg[binary]
+python-dotenv
+pydantic-settings
