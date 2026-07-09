@@ -114,15 +114,29 @@ Pipeline inicial que lê e valida os documentos da `knowledge_base/`:
 python -m app.ingest
 ```
 
-Nesta etapa o script apenas **carrega e valida** os documentos: localiza os arquivos
-`.md`, extrai o front matter YAML, separa metadados do corpo, valida os metadados
-obrigatórios (`title`, `tenant`, `product`, `plan`, `doc_type`, `version`, `status`,
-`visibility`) e imprime um resumo. Ele falha com erro claro se a pasta não existir,
-se nenhum documento for encontrado ou se algum documento tiver front matter/metadados
+O script localiza os arquivos `.md`, extrai o front matter (via `python-frontmatter`),
+valida os metadados obrigatórios (`title`, `tenant`, `product`, `plan`, `doc_type`,
+`version`, `status`, `visibility`) e falha com erro claro se a pasta não existir, se
+nenhum documento for encontrado ou se algum documento tiver front matter/metadados
 inválidos.
 
-Ainda **não há chunking, embeddings, indexação nem retrieval**. O objetivo é garantir
-que a base de conhecimento está estruturada corretamente antes de construir o RAG.
+## Chunk generation
+
+O mesmo comando agora também **gera chunks** dos documentos, preservando os metadados:
+
+```bash
+python -m app.ingest
+```
+
+O chunking usa os splitters do LangChain: primeiro o `MarkdownHeaderTextSplitter`
+preserva a estrutura por seções (`#`, `##`, `###`) e depois o
+`RecursiveCharacterTextSplitter` (`chunk_size=900`, `chunk_overlap=150`) divide seções
+grandes. Cada chunk mantém os metadados do documento e adiciona `chunk_id`,
+`source_file`, `chunk_index`, `section` e `content_length`.
+
+Os chunks são salvos em `data/chunks.jsonl` (uma linha JSON por chunk; a pasta `data/`
+é criada automaticamente e não é versionada). **Embeddings e indexação no pgvector**
+virão na próxima etapa.
 
 ## Estrutura
 
@@ -133,7 +147,7 @@ app/
   main.py     # script de validação do ambiente
   chat.py     # chat de terminal sem RAG (chama o modelo diretamente)
   context_chat.py  # chat com um documento inteiro no prompt (sem RAG)
-  ingest.py   # lê e valida os documentos da knowledge_base (sem RAG)
+  ingest.py   # lê, valida e gera chunks da knowledge_base (sem embeddings)
 knowledge_base/
   company-info.md
   product-overview.md
