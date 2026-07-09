@@ -135,8 +135,25 @@ grandes. Cada chunk mantém os metadados do documento e adiciona `chunk_id`,
 `source_file`, `chunk_index`, `section` e `content_length`.
 
 Os chunks são salvos em `data/chunks.jsonl` (uma linha JSON por chunk; a pasta `data/`
-é criada automaticamente e não é versionada). **Embeddings e indexação no pgvector**
-virão na próxima etapa.
+é criada automaticamente e não é versionada).
+
+## Indexing chunks
+
+Gera embeddings dos chunks e os indexa no Postgres com pgvector:
+
+```bash
+python -m app.index
+```
+
+O script lê `data/chunks.jsonl`, cria um `Document` do LangChain por chunk
+(preservando os metadados), gera embeddings com `OpenAIEmbeddings`
+(`OPENAI_EMBEDDING_MODEL`) e salva tudo no Postgres usando a API atual do
+`langchain-postgres` — `PGEngine` + `PGVectorStore` — na tabela
+`fcai_knowledge_base`, usando `chunk_id` como id. A tabela é recriada a cada execução
+(`overwrite_existing=True`), então rodar o script mais de uma vez **não gera
+duplicidade**.
+
+Ainda **não há retrieval nem resposta com RAG** nesta etapa — apenas a indexação.
 
 ## Estrutura
 
@@ -148,6 +165,7 @@ app/
   chat.py     # chat de terminal sem RAG (chama o modelo diretamente)
   context_chat.py  # chat com um documento inteiro no prompt (sem RAG)
   ingest.py   # lê, valida e gera chunks da knowledge_base (sem embeddings)
+  index.py    # gera embeddings dos chunks e indexa no pgvector (sem retrieval)
 knowledge_base/
   company-info.md
   product-overview.md
