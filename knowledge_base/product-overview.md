@@ -14,8 +14,16 @@ visibility: internal
 O **FCAI Cloud** é uma plataforma de observabilidade que unifica métricas, logs e
 traces em um único painel. Este documento descreve a arquitetura em alto nível, os
 recursos por área, os planos disponíveis, os limites de cada plano, as integrações
-suportadas e os principais casos de uso. Os números e valores citados são fictícios
-e servem apenas como exemplo para a base de conhecimento.
+suportadas, os principais casos de uso e um conjunto de perguntas frequentes. Os
+números e valores citados são fictícios e servem apenas como exemplo para a base de
+conhecimento.
+
+## Conceito
+
+Observabilidade é a capacidade de entender o estado interno de um sistema a partir dos
+dados que ele emite. O FCAI Cloud organiza esses dados em três pilares — métricas,
+logs e traces — e adiciona uma camada de alertas e visualização para transformar dados
+brutos em decisões rápidas durante a operação.
 
 ## Arquitetura em Alto Nível
 
@@ -32,6 +40,14 @@ O FCAI Cloud é composto por três camadas principais:
 A ingestão é feita por região, e o cliente escolhe a região de armazenamento no momento
 da criação da organização. A retenção de dados varia conforme o plano contratado.
 
+### Fluxo de Dados
+
+1. O agente coleta os dados no ambiente do cliente.
+2. Os dados são enviados de forma segura para o endpoint de ingestão da região.
+3. A plataforma valida, normaliza e indexa os dados.
+4. Os dados ficam disponíveis para consulta em dashboards e exploradores.
+5. Regras de alerta avaliam os dados continuamente e disparam notificações.
+
 ## Recursos por Área
 
 ### Métricas
@@ -40,6 +56,7 @@ da criação da organização. A retenção de dados varia conforme o plano cont
 - Suporte a métricas customizadas via SDK e via protocolo compatível com OpenTelemetry.
 - Agregações por tags e dimensões, com granularidade configurável.
 - Visualização em gráficos de linha, área, barras e mapas de calor.
+- Funções de consulta para taxas, percentis e janelas móveis.
 
 ### Logs
 
@@ -47,6 +64,7 @@ da criação da organização. A retenção de dados varia conforme o plano cont
 - Busca de texto completo com filtros por atributos estruturados.
 - Parsing e enriquecimento de logs por regras configuráveis.
 - Retenção configurável conforme o plano, com arquivamento opcional.
+- Detecção de padrões e agrupamento de logs semelhantes.
 
 ### Tracing Distribuído
 
@@ -54,6 +72,7 @@ da criação da organização. A retenção de dados varia conforme o plano cont
 - Visualização de spans em linha do tempo, com identificação de gargalos.
 - Correlação automática entre traces, logs e métricas do mesmo contexto.
 - Amostragem configurável para controlar o volume de dados.
+- Mapa de serviços mostrando dependências e latências entre componentes.
 
 ### Alertas
 
@@ -61,6 +80,7 @@ da criação da organização. A retenção de dados varia conforme o plano cont
 - Notificação por e-mail, Slack, Microsoft Teams, PagerDuty e webhook genérico.
 - Políticas de silenciamento e agrupamento para reduzir ruído.
 - Histórico de disparos e status de cada alerta.
+- Escalonamento de alertas não reconhecidos dentro de um prazo configurável.
 
 ### Dashboards
 
@@ -68,6 +88,7 @@ da criação da organização. A retenção de dados varia conforme o plano cont
 - Compartilhamento interno e links de leitura para stakeholders.
 - Modelos (templates) de dashboard para cenários comuns.
 - Variáveis de dashboard para filtrar por ambiente, serviço ou região.
+- Modo de visualização em tela cheia para NOC e paineis de operação.
 
 ## Planos
 
@@ -116,7 +137,9 @@ séries temporais ativas. O comportamento ao atingir o limite varia por plano:
 - **Enterprise:** o volume é negociado por contrato, com regras de excedente próprias.
 
 Os limites são medidos por ciclo de faturamento e podem ser acompanhados no painel de
-uso da organização. Notificações são enviadas ao atingir 80% e 100% da cota.
+uso da organização. Notificações são enviadas ao atingir 80% e 100% da cota. É possível
+configurar cotas por time no plano Enterprise, evitando que um único time consuma toda
+a capacidade contratada.
 
 ## Integrações
 
@@ -127,9 +150,12 @@ conectores nativos para os principais ambientes:
 - **Docker:** coleta de métricas e logs de containers em hosts individuais.
 - **Provedores de nuvem:** conectores para métricas de serviços gerenciados populares.
 - **Ferramentas de incidentes:** integração com PagerDuty e canais de mensageria.
+- **Mensageria:** Slack e Microsoft Teams para notificações de alertas.
+- **Webhooks:** integração genérica para sistemas internos do cliente.
 
 SDKs oficiais estão disponíveis para as linguagens mais usadas em backend, permitindo
-instrumentação manual quando necessário.
+instrumentação manual quando necessário. A instrumentação automática cobre bibliotecas
+populares de HTTP, banco de dados e filas de mensagens.
 
 ## Casos de Uso
 
@@ -138,9 +164,32 @@ instrumentação manual quando necessário.
 - **Análise de performance:** identificar gargalos em requisições distribuídas.
 - **Capacidade e custo:** acompanhar tendências de uso para planejar infraestrutura.
 - **Conformidade:** reter logs pelo período exigido por políticas internas.
+- **Experiência do usuário:** correlacionar latência de backend com impacto no cliente.
+
+### Exemplo de Cenário
+
+Durante um incidente, a latência de um serviço aumenta. O time abre o dashboard do
+serviço, identifica um pico de erros nos logs, segue o trace de uma requisição lenta e
+descobre que uma dependência externa está respondendo devagar. Com métricas, logs e
+traces no mesmo lugar, o diagnóstico leva minutos em vez de horas.
 
 ## Roadmap (Informativo)
 
 O roadmap fictício da plataforma inclui evoluções em detecção de anomalias, dashboards
 colaborativos e relatórios de conformidade. As datas e prioridades são definidas
 internamente e podem mudar sem aviso, não constituindo compromisso contratual.
+
+## Perguntas Frequentes
+
+**O FCAI Cloud usa OpenTelemetry?**
+Sim. A coleta é compatível com OpenTelemetry, além de conectores nativos.
+
+**Posso mudar a região de armazenamento depois?**
+A região é definida na criação da organização e só muda por migração assistida.
+
+**O que acontece se eu ultrapassar a cota de ingestão?**
+No Starter a ingestão para; no Pro e Enterprise há cobrança por consumo excedente.
+
+**Existe limite de dashboards?**
+Não há limite rígido de dashboards; os limites principais são de usuários, retenção e
+ingestão, conforme o plano.

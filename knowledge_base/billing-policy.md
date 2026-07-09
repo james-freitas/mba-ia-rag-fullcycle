@@ -13,8 +13,16 @@ visibility: internal
 
 Este documento descreve as formas de pagamento do **FCAI Cloud**, os ciclos de
 cobrança, a cobrança por consumo excedente, a emissão de notas fiscais, o tratamento de
-falhas de cobrança, o processo de regularização de acesso e as regras de reembolso.
-Todos os valores e prazos são fictícios e servem como exemplo.
+falhas de cobrança, o processo de regularização de acesso, a retenção de dados após
+suspensão e as regras de reembolso. Todos os valores e prazos são fictícios e servem
+como exemplo.
+
+## Princípios de Faturamento
+
+- Cobrança previsível, com valores e ciclos claros antes da contratação.
+- Notificação de consumo antes de qualquer cobrança de excedente.
+- Preservação de dados e configurações durante o período de regularização.
+- Restabelecimento automático do acesso após a quitação de pendências.
 
 ## Formas de Pagamento
 
@@ -23,7 +31,7 @@ Todos os valores e prazos são fictícios e servem como exemplo.
 O plano **Pro** é cobrado por cartão de crédito de forma recorrente, mensal ou anual. A
 confirmação da cobrança é imediata, e o acesso permanece ativo enquanto o pagamento for
 aprovado. O cliente pode atualizar os dados do cartão a qualquer momento no painel de
-faturamento.
+faturamento. Recomenda-se manter um cartão de backup para evitar interrupções.
 
 ### Boleto Bancário
 
@@ -41,6 +49,7 @@ contrato. As condições incluem:
 - Emissão de nota fiscal conforme o acordo comercial.
 - Prazos de pagamento negociados (por exemplo, 15, 30 ou 45 dias).
 - Possibilidade de faturamento por centro de custo ou por unidade de negócio.
+- Envio das faturas para os contatos financeiros cadastrados.
 
 ## Ciclos de Cobrança
 
@@ -63,7 +72,14 @@ plano é cobrado como **consumo excedente**:
 - Notificações são enviadas ao atingir **80%** e **100%** da cota do plano.
 - No **Enterprise**, as regras e os valores de excedente seguem o contrato.
 
-O consumo excedente já faturado não é reembolsável.
+O consumo excedente já faturado não é reembolsável. É possível definir alertas de
+consumo para evitar surpresas na fatura.
+
+### Exemplo de Cálculo (fictício)
+
+Se o plano Pro inclui 100 GB de ingestão de logs e a organização consome 130 GB no
+ciclo, os 30 GB adicionais são cobrados como excedente, conforme o preço por GB vigente,
+no fechamento do ciclo.
 
 ## Impostos e Notas Fiscais
 
@@ -73,6 +89,8 @@ O consumo excedente já faturado não é reembolsável.
   faturamento.
 - Clientes corporativos podem configurar dados fiscais específicos, como razão social,
   CNPJ e endereço de faturamento.
+- Ajustes de dados fiscais devem ser feitos antes do fechamento do ciclo para constar
+  na nota daquele período.
 
 ## Falha de Cobrança
 
@@ -97,6 +115,16 @@ Durante a pendência financeira, a conta pode entrar em **modo restrito**, com:
 Se a pendência não for resolvida dentro do prazo, a conta pode ser **suspensa** e, após
 prazo adicional, os dados podem ser removidos conforme a política de retenção.
 
+### Linha do Tempo (fictícia)
+
+- **Dia 0:** falha de cobrança e notificação.
+- **Dias 1 a 7:** período de tolerância, conta ativa.
+- **Dia 8:** modo restrito, ingestão suspensa.
+- **Dia 30:** suspensão da conta.
+- **Dia 60:** possível remoção de dados conforme a retenção.
+
+Os prazos acima são ilustrativos e podem variar conforme o plano e o contrato.
+
 ## Regularização de Acesso
 
 Após a confirmação do pagamento pendente:
@@ -107,6 +135,13 @@ Após a confirmação do pagamento pendente:
 - A ingestão de dados é retomada a partir do momento da regularização; dados do período
   de suspensão podem não ser recuperados.
 
+## Retenção e Exclusão de Dados
+
+Após o cancelamento ou a suspensão definitiva, os dados entram em um processo de
+retenção e depois são excluídos conforme a política vigente. Clientes Enterprise podem
+solicitar a exportação dos dados antes da exclusão, dentro do prazo previsto em
+contrato.
+
 ## Reembolso e Créditos
 
 - O reembolso do plano **Pro** segue a política comercial: até **7 dias corridos** após
@@ -116,7 +151,18 @@ Após a confirmação do pagamento pendente:
 - Ajustes de cobrança por erro de faturamento são corrigidos na próxima fatura ou por
   nota de crédito, conforme o caso.
 
-## Contato do Financeiro
+## Perguntas Frequentes
 
-Dúvidas sobre faturas, notas fiscais, formas de pagamento e regularização devem ser
-enviadas para financeiro@fcai.example.com, em horário comercial.
+**O que acontece se meu cartão falhar?**
+Você é notificado e a cobrança é reprocessada em até 3 tentativas antes de restringir o
+acesso.
+
+**Perco meus dados se a conta for suspensa?**
+Durante o modo restrito os dados ficam em somente leitura; a remoção só ocorre após os
+prazos de suspensão e retenção.
+
+**Consigo nota fiscal?**
+Sim. A nota é emitida a cada cobrança e fica disponível no portal de faturamento.
+
+**Como evito cobrança de excedente?**
+Acompanhe o painel de uso e configure alertas de consumo em 80% e 100% da cota.

@@ -14,8 +14,8 @@ visibility: internal
 O plano **Enterprise** do FCAI Cloud é voltado para empresas com times grandes, alto
 volume de dados e requisitos avançados de segurança, governança e suporte. Este
 documento detalha benefícios, segurança e conformidade, gestão de usuários e acessos,
-onboarding, suporte diferenciado, condições comerciais e as diferenças em relação aos
-planos Starter e Pro. Todos os números são fictícios.
+onboarding, suporte diferenciado, condições comerciais, SLA e as diferenças em relação
+aos planos Starter e Pro. Todos os números são fictícios.
 
 ## Para Quem é o Enterprise
 
@@ -26,6 +26,7 @@ O Enterprise atende organizações que:
 - Exigem controles de segurança como SSO e RBAC.
 - Necessitam de suporte com SLA reduzido e cobertura 24x7.
 - Preferem faturamento corporativo em vez de cobrança por cartão.
+- Requerem governança centralizada e relatórios executivos.
 
 ## Benefícios
 
@@ -35,6 +36,7 @@ O Enterprise atende organizações que:
 - **Ambiente com isolamento dedicado** disponível sob demanda.
 - **Detecção de anomalias** e alertas avançados incluídos.
 - **Relatórios executivos** de uso, disponibilidade e adoção.
+- **Cotas por time**, evitando que um time consuma toda a capacidade.
 
 ## Segurança e Conformidade
 
@@ -46,6 +48,13 @@ O Enterprise atende organizações que:
 - **Política de retenção e exclusão** de dados configurável conforme exigências
   internas do cliente.
 - **Relatórios de conformidade** disponibilizados sob acordo de confidencialidade.
+- **Restrição de acesso por rede** (lista de IPs permitidos), quando aplicável.
+
+### Governança de Dados
+
+O Enterprise permite definir políticas de retenção e mascaramento de dados sensíveis em
+logs, além de controlar quais times têm acesso a quais fontes de dados. Essas políticas
+são configuradas pelo administrador da organização e auditadas via trilhas de acesso.
 
 ## Gestão de Usuários e Acessos
 
@@ -57,6 +66,13 @@ O plano Enterprise oferece um painel de administração central que permite:
 - Definir políticas de acesso, como restrição por domínio de e-mail corporativo.
 - Consultar trilhas de auditoria para fins de segurança e governança.
 
+### Papéis Padrão (fictícios)
+
+- **Administrador:** gerencia a organização, times, cobrança e segurança.
+- **Editor:** cria e edita dashboards, alertas e integrações.
+- **Analista:** consulta dados e dashboards, sem alterar configurações.
+- **Somente leitura:** acesso de visualização para stakeholders.
+
 ## Onboarding e Adoção
 
 Clientes Enterprise contam com um processo de onboarding assistido, fictício, que
@@ -67,11 +83,17 @@ inclui:
 3. **Capacitação:** treinamento dos times na plataforma.
 4. **Acompanhamento:** revisões periódicas de adoção com o gerente de conta.
 
+### Plano de Sucesso
+
+O gerente de conta define, junto ao cliente, um plano de sucesso com metas de adoção,
+marcos de implantação e indicadores de valor. Revisões trimestrais avaliam o progresso
+e ajustam o plano conforme a evolução do uso.
+
 ## Suporte Diferenciado
 
 - Suporte **24x7** para chamados críticos.
 - **SLA reduzido:** P1 com resposta em até 1 hora (ver documento de SLA de suporte).
-- **Canal dedicado** de atendimento.
+- **Canal dedicado** de atendimento e telefone de emergência para P1.
 - **Gerente de conta** responsável pelo acompanhamento da conta e dos chamados P1 e P2.
 - **Relatório de causa raiz** (post-mortem) para incidentes críticos.
 
@@ -82,6 +104,13 @@ inclui:
 - Descontos por volume de usuários e de ingestão.
 - Prazos de pagamento e formas de cobrança negociados (ver política de faturamento).
 - Cláusulas de renovação e reajuste definidas em contrato.
+- Possibilidade de faturamento por centro de custo ou unidade de negócio.
+
+## Disponibilidade e Créditos
+
+O Enterprise conta com meta de disponibilidade de **99,9%** ao mês e política de
+créditos de SLA quando a meta não é atingida, conforme detalhado no documento de SLA de
+suporte. Os créditos são aplicados como desconto na fatura seguinte.
 
 ## Diferenças em Relação aos Planos Starter e Pro
 
@@ -94,8 +123,24 @@ inclui:
 | SSO / RBAC / Auditoria | não | não | sim |
 | Faturamento | — | cartão | corporativo por contrato |
 | Gerente de conta | não | não | sim |
+| Crédito de SLA | não | não | sim |
 
 Em resumo, o Enterprise se diferencia por escala (usuários e retenção ilimitados ou
 amplamente configuráveis), segurança avançada (SSO, RBAC e auditoria), suporte com
 cobertura 24x7 e um modelo comercial baseado em contrato corporativo, em vez de
 cobrança recorrente por cartão.
+
+## Perguntas Frequentes
+
+**O Enterprise tem limite de usuários?**
+Não. O plano oferece usuários ilimitados.
+
+**Como funciona o SSO?**
+Via SAML, integrando com o provedor de identidade do cliente, com provisionamento por
+SCIM.
+
+**Existe gerente de conta?**
+Sim. O Enterprise inclui um gerente de conta dedicado.
+
+**Qual a retenção máxima de dados?**
+Configurável em até 15 meses, conforme o contrato.

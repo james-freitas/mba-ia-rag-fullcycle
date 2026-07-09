@@ -106,6 +106,24 @@ quando há muitos documentos, controle de permissões e versões, custo de token
 documento inteiro é enviado a cada pergunta) e necessidade de busca seletiva do
 trecho relevante — problemas que o RAG resolve nas próximas etapas.
 
+## Initial ingestion pipeline
+
+Pipeline inicial que lê e valida os documentos da `knowledge_base/`:
+
+```bash
+python -m app.ingest
+```
+
+Nesta etapa o script apenas **carrega e valida** os documentos: localiza os arquivos
+`.md`, extrai o front matter YAML, separa metadados do corpo, valida os metadados
+obrigatórios (`title`, `tenant`, `product`, `plan`, `doc_type`, `version`, `status`,
+`visibility`) e imprime um resumo. Ele falha com erro claro se a pasta não existir,
+se nenhum documento for encontrado ou se algum documento tiver front matter/metadados
+inválidos.
+
+Ainda **não há chunking, embeddings, indexação nem retrieval**. O objetivo é garantir
+que a base de conhecimento está estruturada corretamente antes de construir o RAG.
+
 ## Estrutura
 
 ```
@@ -115,6 +133,7 @@ app/
   main.py     # script de validação do ambiente
   chat.py     # chat de terminal sem RAG (chama o modelo diretamente)
   context_chat.py  # chat com um documento inteiro no prompt (sem RAG)
+  ingest.py   # lê e valida os documentos da knowledge_base (sem RAG)
 knowledge_base/
   company-info.md
   product-overview.md

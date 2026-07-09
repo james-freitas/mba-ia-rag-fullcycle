@@ -4,3 +4,4 @@ langchain-postgres
 psycopg[binary]
 python-dotenv
 pydantic-settings
+PyYAML
