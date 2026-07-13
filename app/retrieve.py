@@ -9,7 +9,7 @@ from app.config import settings
 from app.db import get_connection
 from app.index import ID_COLUMN, TABLE_NAME
 
-DEFAULT_TOP_K = 5
+DEFAULT_TOP_K = 30
 FILTER_FIELDS = ["tenant", "product", "plan", "doc_type", "status"]
 PREVIEW_LIMIT = 500
 

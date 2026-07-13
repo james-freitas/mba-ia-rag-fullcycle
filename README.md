@@ -184,6 +184,32 @@ se o retrieval encontrou o contexto certo antes de conectar ao LLM — **ainda n
 resposta com RAG**. É preciso ter rodado `python -m app.ingest` e `python -m app.index`
 antes.
 
+## RAG chat
+
+Primeira versão do chat com RAG no terminal:
+
+```bash
+python -m app.rag_chat
+```
+
+Para cada pergunta, o chat **busca os chunks mais relevantes no pgvector** (top-k 5,
+com filtros `tenant=fcai`, `product=fcai-cloud`, `status=published`), **monta um
+contexto simples** com os trechos recuperados (preservando `source_file`, `title`,
+`section` e `version`) e **chama o modelo** com esse contexto, instruído a responder
+apenas com base nele — dizendo que não há informação suficiente quando o contexto não
+sustentar a resposta.
+
+Imprime apenas a resposta (`Answer:`). Para inspecionar o prompt final que foi montado
+e enviado ao modelo (system com o contexto + human com a pergunta), use:
+
+```bash
+python -m app.rag_chat --show-prompt
+```
+
+Ainda **não há fontes estruturadas, scores, API, streaming nem histórico de conversa**.
+É preciso ter rodado `python -m app.ingest` e `python -m app.index` antes. Digite `exit`
+ou `quit` para sair.
+
 ## Estrutura
 
 ```
@@ -196,6 +222,7 @@ app/
   ingest.py   # lê, valida e gera chunks da knowledge_base (sem embeddings)
   index.py    # gera embeddings dos chunks e indexa no pgvector (sem retrieval)
   retrieve.py # busca chunks relevantes no pgvector e imprime (sem resposta RAG)
+  rag_chat.py # chat com RAG: retrieval + contexto + chamada ao modelo
 knowledge_base/
   company-info.md
   product-overview.md
