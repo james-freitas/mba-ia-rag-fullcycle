@@ -199,16 +199,40 @@ contexto simples** com os trechos recuperados (preservando `source_file`, `title
 apenas com base nele — dizendo que não há informação suficiente quando o contexto não
 sustentar a resposta.
 
-Imprime apenas a resposta (`Answer:`). Para inspecionar o prompt final que foi montado
-e enviado ao modelo (system com o contexto + human com a pergunta), use:
+É preciso ter rodado `python -m app.ingest` e `python -m app.index` antes. Digite `exit`
+ou `quit` para sair.
+
+## RAG answer with sources
+
+O chat responde com **Answer** e **Sources**:
+
+```bash
+python -m app.rag_chat
+```
+
+O modelo retorna uma **saída estruturada** (`answer`, `has_answer`, `used_chunk_ids`)
+via `with_structured_output`. As **fontes não são escritas pelo modelo**: a aplicação as
+monta a partir dos `used_chunk_ids` cruzados com os metadados dos chunks realmente
+recuperados (`source_file`, `title`, `section`, `version`). IDs inventados são
+descartados. Quando o contexto não sustenta a resposta (ou nada é recuperado), o chat
+responde que não há informação suficiente e imprime `Sources: No sources.` — sem chamar
+o modelo no caso de retrieval vazio.
+
+Para inspecionar o prompt final enviado ao modelo (system com o contexto + human com a
+pergunta):
 
 ```bash
 python -m app.rag_chat --show-prompt
 ```
 
-Ainda **não há fontes estruturadas, scores, API, streaming nem histórico de conversa**.
-É preciso ter rodado `python -m app.ingest` e `python -m app.index` antes. Digite `exit`
-ou `quit` para sair.
+Para inspecionar os chunks recuperados antes da resposta (rank, score, `chunk_id`,
+arquivo, título, seção, versão e preview):
+
+```bash
+python -m app.rag_chat --debug
+```
+
+Ainda **não há API, frontend, streaming nem histórico de conversa**.
 
 ## Estrutura
 
