@@ -1,3 +1,4 @@
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -80,7 +81,22 @@ def section_of(header_metadata: dict) -> str | None:
     return None
 
 
-def chunk_document(path: Path, post: frontmatter.Post) -> list[dict]:
+def build_context_header(metadata: dict, section: str | None) -> str:
+    lines = [
+        f"Document title: {metadata.get('title')}",
+        f"Document type: {metadata.get('doc_type')}",
+        f"Product: {metadata.get('product')}",
+        f"Plan: {metadata.get('plan')}",
+        f"Version: {metadata.get('version')}",
+    ]
+    if section:
+        lines.append(f"Section: {section}")
+    return "\n".join(lines)
+
+
+def chunk_document(
+    path: Path, post: frontmatter.Post, context_header: bool = True
+) -> list[dict]:
     # First splitter: break the Markdown by headings, keeping each section's
     # heading path (h1/h2/h3) inside the resulting Document metadata.
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=HEADERS_TO_SPLIT_ON)
@@ -103,8 +119,17 @@ def chunk_document(path: Path, post: frontmatter.Post) -> list[dict]:
         metadata["source_file"] = path.name
         metadata["chunk_index"] = index
         metadata["section"] = section_of(piece.metadata)
-        metadata["content_length"] = len(piece.page_content)
-        chunks.append({"content": piece.page_content, "metadata": metadata})
+
+        # Prepend a short context header to the indexed text, so a chunk taken out
+        # of the middle of a document still states which document, section, plan
+        # and version it belongs to. This is what the embedding actually sees.
+        content = piece.page_content
+        if context_header:
+            header = build_context_header(post.metadata, metadata["section"])
+            content = f"{header}\n\n{content}"
+
+        metadata["content_length"] = len(content)
+        chunks.append({"content": content, "metadata": metadata})
 
     return chunks
 
@@ -126,7 +151,16 @@ def print_sample(chunks: list[dict]) -> None:
         )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Ingest and chunk the knowledge base.")
+    parser.add_argument("--no-context-header", action="store_true")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+    context_header = not args.no_context_header
+
     print("Loading documents from knowledge_base...")
     try:
         documents = load_documents()
@@ -137,9 +171,10 @@ def main() -> None:
     print(f"Loaded documents: {len(documents)}")
 
     print("Generating chunks...")
+    print(f"Context header: {'enabled' if context_header else 'disabled'}")
     chunks = []
     for path, post in documents:
-        chunks.extend(chunk_document(path, post))
+        chunks.extend(chunk_document(path, post, context_header=context_header))
     print(f"Generated chunks: {len(chunks)}")
 
     save_chunks(chunks)

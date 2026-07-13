@@ -234,6 +234,84 @@ python -m app.rag_chat --debug
 
 Ainda **não há API, frontend, streaming nem histórico de conversa**.
 
+## Improving retrieval
+
+Um chunk tirado do meio de um documento pode conter a resposta mas perder o contexto
+(de qual documento veio, qual seção, plano, tipo e versão). Para resolver isso, o
+`ingest.py` agora prefixa cada chunk com um **cabeçalho de contexto** antes de indexar:
+
+```
+Document title: SLA de Suporte ao Produto
+Document type: sla
+Product: fcai-cloud
+Plan: all
+Version: 2026-01
+Section: Créditos de SLA
+
+<conteúdo original do chunk>
+```
+
+Esse cabeçalho é o que o **embedding enxerga**, então o chunk fica autoexplicativo tanto
+para a busca quanto para o prompt final. Os metadados continuam sendo salvos
+separadamente (`chunk_id`, `source_file`, `title`, `section`, `tenant`, `product`,
+`plan`, `doc_type`, `version`, `status`, `visibility`).
+
+Para aplicar, regere os chunks e reindexe (a reindexação continua idempotente):
+
+```bash
+python -m app.ingest
+python -m app.index
+```
+
+### Demonstração antes/depois
+
+A flag `--no-context-header` no `ingest` regera os chunks **sem** o cabeçalho, do jeito
+antigo. Isso permite um A/B usando o próprio pipeline:
+
+```bash
+# ANTES: chunks sem cabeçalho de contexto
+python -m app.ingest --no-context-header
+python -m app.index
+python -m app.retrieve "Quais são os limites do plano Pro?" --top-k 3
+
+# DEPOIS: chunks com cabeçalho de contexto
+python -m app.ingest
+python -m app.index
+python -m app.retrieve "Quais são os limites do plano Pro?" --top-k 3
+```
+
+Exemplo real de diferença nessa pergunta:
+
+| | Top 3 recuperado |
+| --- | --- |
+| **Antes** | `billing-policy` (Cobrança por Consumo Excedente, Exemplo de Cálculo, Cartão de Crédito) — nenhum chunk sobre planos |
+| **Depois** | `enterprise-plan` (Diferenças entre Starter/Pro/Enterprise, FAQ, Benefícios) — a tabela comparativa de planos |
+
+O motivo: o `MarkdownHeaderTextSplitter` remove a linha do cabeçalho do conteúdo, então
+o chunk da seção "Pro" ficava sem a palavra "Pro" no texto — e **metadados não entram no
+embedding**, só no filtro e no prompt. Com o cabeçalho, o embedding passa a enxergar
+título, seção, plano, tipo e versão.
+
+### Casos de teste manuais
+
+Rode com `--debug` para comparar antes/depois e observar se os chunks recuperados agora
+carregam título, seção, plano, tipo de documento e versão no preview:
+
+```bash
+python -m app.rag_chat --debug
+```
+
+Perguntas sugeridas:
+
+- Qual é o tempo de resposta para P1 no plano Enterprise?
+- Qual crédito de SLA é aplicado quando a disponibilidade fica entre 98,0% e 99,0%?
+- O Enterprise tem SSO e SCIM?
+- O que acontece se eu ultrapassar a cota de ingestão?
+- Como funciona o pagamento corporativo no Enterprise?
+
+Ainda **não há busca híbrida (BM25), reranking nem query rewriting** — o foco desta
+etapa é só resolver o chunk sem contexto com uma melhoria simples na ingestão.
+
 ## Estrutura
 
 ```

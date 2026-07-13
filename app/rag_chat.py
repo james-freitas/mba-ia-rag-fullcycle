@@ -71,7 +71,6 @@ def print_debug(results: list[tuple[Document, float]]) -> None:
         print("No chunks retrieved.")
     for rank, (document, score) in enumerate(results, start=1):
         metadata = document.metadata
-        preview = " ".join(document.page_content.split())[:PREVIEW_LIMIT]
         print(f"\n{rank}. Score: {score:.2f}")
         print(f"   Chunk ID: {metadata.get('chunk_id')}")
         print(f"   Source: {metadata.get('source_file')}")
@@ -79,7 +78,9 @@ def print_debug(results: list[tuple[Document, float]]) -> None:
         if metadata.get("section"):
             print(f"   Section: {metadata['section']}")
         print(f"   Version: {metadata.get('version')}")
-        print(f"   Preview: {preview}")
+        print("   Preview:")
+        for line in document.page_content[:PREVIEW_LIMIT].splitlines():
+            print(f"     {line}")
     print("\n--- End of retrieved chunks ---")
 
 
