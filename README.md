@@ -155,6 +155,35 @@ duplicidade**.
 
 Ainda **não há retrieval nem resposta com RAG** nesta etapa — apenas a indexação.
 
+## Isolated retrieval
+
+Testa o retrieval isoladamente: faz a pergunta, busca os chunks mais relevantes no
+Postgres (pgvector) e imprime os resultados — **sem chamar o modelo de chat**.
+
+```bash
+python -m app.retrieve "Qual é o SLA para incidentes P1 no plano Enterprise?"
+```
+
+Se nenhuma pergunta for passada como argumento, ela é pedida interativamente. Use
+`--top-k` para mudar quantos chunks retornar (padrão 5):
+
+```bash
+python -m app.retrieve "Qual é o SLA para P1?" --top-k 5
+```
+
+Filtros simples por metadados (`--tenant`, `--product`, `--plan`, `--doc-type`,
+`--status`) podem ser combinados:
+
+```bash
+python -m app.retrieve "Qual é o SLA para P1?" --product fcai-cloud --status published
+```
+
+Para cada resultado são exibidos score, `chunk_id`, arquivo de origem, título, seção,
+plano, tipo, versão, status e um trecho do conteúdo. Esta etapa serve para inspecionar
+se o retrieval encontrou o contexto certo antes de conectar ao LLM — **ainda não há
+resposta com RAG**. É preciso ter rodado `python -m app.ingest` e `python -m app.index`
+antes.
+
 ## Estrutura
 
 ```
@@ -166,6 +195,7 @@ app/
   context_chat.py  # chat com um documento inteiro no prompt (sem RAG)
   ingest.py   # lê, valida e gera chunks da knowledge_base (sem embeddings)
   index.py    # gera embeddings dos chunks e indexa no pgvector (sem retrieval)
+  retrieve.py # busca chunks relevantes no pgvector e imprime (sem resposta RAG)
 knowledge_base/
   company-info.md
   product-overview.md
