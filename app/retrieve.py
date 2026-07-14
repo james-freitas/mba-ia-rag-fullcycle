@@ -2,6 +2,7 @@ import argparse
 import sys
 
 import psycopg
+from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_postgres import PGEngine, PGVectorStore
 
@@ -59,12 +60,18 @@ def connect_store() -> PGVectorStore:
 def format_filters(filters: dict) -> str:
     if not filters:
         return "none"
-    return ", ".join(f"{key}={value}" for key, value in filters.items())
+    parts = []
+    for key, value in filters.items():
+        if isinstance(value, dict):
+            value = " or ".join(value["$in"])
+        parts.append(f"{key}={value}")
+    return ", ".join(parts)
 
 
-def print_result(rank: int, document, score: float) -> None:
+def print_chunk(
+    rank: int, document: Document, score: float, preview_limit: int = PREVIEW_LIMIT
+) -> None:
     metadata = document.metadata
-    preview = " ".join(document.page_content.split())[:PREVIEW_LIMIT]
     print(f"{rank}. Score: {score:.2f}")
     print(f"   Chunk ID: {metadata.get('chunk_id')}")
     print(f"   Source: {metadata.get('source_file')}")
@@ -75,7 +82,9 @@ def print_result(rank: int, document, score: float) -> None:
     print(f"   Type: {metadata.get('doc_type')}")
     print(f"   Version: {metadata.get('version')}")
     print(f"   Status: {metadata.get('status')}")
-    print(f"   Preview: {preview}")
+    print("   Preview:")
+    for line in document.page_content[:preview_limit].splitlines():
+        print(f"     {line}")
     print()
 
 
@@ -112,7 +121,7 @@ def main() -> None:
     print("Results:")
     print()
     for rank, (document, score) in enumerate(results, start=1):
-        print_result(rank, document, score)
+        print_chunk(rank, document, score)
 
 
 if __name__ == "__main__":

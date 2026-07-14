@@ -1,19 +1,49 @@
-# fc-rag-pgvector
+# RAG Knowledge Chat
 
-Base inicial de um Knowledge Chat com RAG usando Python, LangChain e Postgres com pgvector.
+Knowledge Chat com RAG usando Python, LangChain (v1) e Postgres com pgvector.
 
-Esta etapa prepara a fundação do projeto: ambiente, banco de dados com a extensão
-`pgvector` e validação de configuração/conexão. O pipeline completo de RAG (chunking,
-embeddings, retrieval e chamada ao LLM) será implementado nas próximas etapas.
+O projeto implementa um pipeline completo de RAG em módulos pequenos e independentes:
+ingestão e chunking de documentos Markdown, indexação vetorial no Postgres,
+**query planner** (o modelo interpreta a pergunta e planeja a busca antes do retrieval),
+busca vetorial filtrada por metadados e resposta com fontes. A base de exemplo é a
+documentação interna de uma empresa SaaS fictícia (FCAI), mas a estrutura serve para
+qualquer base de documentos Markdown com metadados.
+
+## Como funciona
+
+Fluxo de uma pergunta no chat:
+
+```
+pergunta do usuário
+   │
+   ▼
+query planner (modelo, structured output)
+   │        └── pergunta ambígua? → devolve uma pergunta de esclarecimento e para
+   ▼
+busca vetorial no pgvector
+   (pergunta normalizada + termos exatos, com filtros de metadados)
+   │
+   ▼
+modelo de resposta (structured output)
+   │
+   ▼
+Answer + Sources (as fontes são montadas pela aplicação, não pelo modelo)
+```
+
+O modelo de chat é chamado em exatamente dois pontos: no query planner e na resposta
+final. Ingestão e indexação não chamam o modelo de chat — apenas o modelo de
+embeddings.
 
 ## Requisitos
 
 - Python 3.11+
 - Docker e Docker Compose
+- Uma chave de API da OpenAI
 
-## Como rodar
+## Setup
 
-1. Crie o `.env` a partir do exemplo e preencha `OPENAI_API_KEY`:
+1. Crie o `.env` a partir do exemplo e preencha `OPENAI_API_KEY` (o exemplo já traz
+   modelo de chat, modelo de embeddings e URL do banco):
 
    ```bash
    cp .env.example .env
@@ -25,313 +55,225 @@ embeddings, retrieval e chamada ao LLM) será implementado nas próximas etapas.
    docker compose up -d
    ```
 
-3. Crie e ative o ambiente virtual:
+3. Crie o ambiente virtual e instale as dependências:
 
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
-   ```
-
-4. Instale as dependências:
-
-   ```bash
    pip install -r requirements.txt
    ```
 
-5. Valide o ambiente:
+4. Valide ambiente, conexão e extensão pgvector:
 
    ```bash
    python -m app.main
    ```
 
-   Saída esperada:
-
-   ```
-   Environment loaded.
-   Database connection ok.
-   pgvector extension enabled.
-   Project setup completed.
-   ```
-
-## Knowledge base
-
-Os documentos de exemplo da base de conhecimento ficam em `knowledge_base/`. São
-seis arquivos Markdown em português sobre uma empresa SaaS fictícia (FCAI),
-cobrindo informações da empresa, visão geral do produto, política comercial, SLA de
-suporte, plano Enterprise e faturamento.
-
-Cada arquivo possui metadados no front matter YAML (`title`, `tenant`, `product`,
-`plan`, `doc_type`, `version`, `status`, `visibility`) que servirão de base para
-filtros de RAG.
-
-Esses documentos serão usados nas próximas etapas para ingestão, chunking, indexação
-e retrieval. Nesta etapa ainda não há RAG implementado.
-
-## No-RAG chat
-
-Um chat simples de terminal que chama o modelo diretamente:
+## Preparando a base
 
 ```bash
-python -m app.chat
+python -m app.ingest   # lê, valida e gera os chunks (data/chunks.jsonl)
+python -m app.index    # gera embeddings e indexa no pgvector
 ```
 
-Este chat envia a pergunta direto ao modelo (instanciado com `init_chat_model`, no
-padrão da LangChain v1) e **ainda não usa a base interna** em `knowledge_base/`. A
-resposta é exibida em streaming. Ele serve como linha de base para comparar, nas
-próximas aulas, com as respostas obtidas quando o RAG estiver implementado. Digite
-`exit` ou `quit` para encerrar.
+O `ingest` valida o front matter de cada documento (metadados obrigatórios: `title`,
+`tenant`, `product`, `plan`, `doc_type`, `version`, `status`, `visibility`) e falha com
+erro claro quando algo está faltando. O chunking preserva a estrutura do Markdown
+(`MarkdownHeaderTextSplitter` por seções, depois `RecursiveCharacterTextSplitter` com
+`chunk_size=900` e `chunk_overlap=150`), e cada chunk carrega os metadados do documento
+mais os seus próprios (`chunk_id`, `source_file`, `chunk_index`, `section`,
+`content_length`).
 
-## Full-document context chat
+Cada chunk é prefixado com um **cabeçalho de contexto** (título, tipo, produto, plano,
+versão e seção) antes de ser indexado. Metadados não entram no embedding — só no filtro
+— então é esse cabeçalho que torna um chunk tirado do meio de um documento
+autoexplicativo para a busca e para o prompt final. A flag `--no-context-header` gera
+os chunks sem o cabeçalho, útil para comparar a qualidade do retrieval com e sem ele.
 
-Uma segunda versão do chat que lê **um documento inteiro** da `knowledge_base/` e o
-envia como contexto no prompt:
+O `index` recria a tabela `fcai_knowledge_base` a cada execução usando `chunk_id` como
+id (`PGEngine` + `PGVectorStore`, API atual do `langchain-postgres`), então reindexar é
+idempotente: rodar de novo não duplica nada.
+
+## Usando o chat
 
 ```bash
-python -m app.context_chat
+python -m app.rag_chat                # o chat com RAG
+python -m app.rag_chat --debug        # imprime o QueryPlan, os filtros e os chunks recuperados
+python -m app.rag_chat --show-prompt  # imprime o prompt do planner e o prompt final
 ```
 
-Por padrão usa `knowledge_base/product-support-sla.md`. É possível trocar o documento
-passando o nome do arquivo como argumento:
+Digite `exit` ou `quit` para sair.
 
-```bash
-python -m app.context_chat product-overview.md
+O modelo de resposta retorna saída estruturada (`answer`, `has_answer`,
+`used_chunk_ids`) e é instruído a responder **somente com base no contexto
+recuperado**. As **fontes não são escritas pelo modelo**: a aplicação as monta cruzando
+os `used_chunk_ids` com os metadados dos chunks realmente recuperados (`source_file`,
+`title`, `section`, `version`) — IDs inventados são descartados. Quando o contexto não
+sustenta a resposta, o chat diz que não há informação suficiente e imprime
+`Sources: No sources.`.
+
+Perguntas para ver o planner trabalhando (com `--debug`):
+
+- E se der problema grave no Enterprise? → normaliza para P1 + SLA, `plan=enterprise`
+- Como funciona o suporte no plano da empresa? → ambígua, pede esclarecimento
+- Qual é o e-mail de suporte? → `doc_types` inclui `sla` (o e-mail mora no doc de SLA)
+- O que acontece se eu ultrapassar a cota de ingestão? → `plan=null`, resposta cobre os três planos
+
+## O query planner
+
+A pergunta que o usuário digita quase nunca é a melhor pergunta para buscar no banco.
+Antes do retrieval, o chat faz uma chamada ao modelo com structured output
+(`QueryPlan`, em `app/query_planner.py`) que interpreta a pergunta e planeja a busca.
+Cada campo do plano tem um efeito concreto:
+
+| Campo | O que ele faz |
+| --- | --- |
+| `normalized_question` | reescrita autoexplicativa da pergunta; é o texto da busca semântica |
+| `exact_terms` | literais (P1, SSO, 99,9%…) anexados ao texto da busca, para o embedding não perdê-los |
+| `doc_types` | vira filtro `doc_type IN (...)` |
+| `plan` | vira filtro `plan IN [plano, "all"]` |
+| `needs_clarification` | interrompe o fluxo antes do retrieval e devolve uma pergunta de esclarecimento |
+
+A pergunta original continua sendo a que o modelo final responde — a normalizada serve
+só para buscar.
+
+### Filtros: o que é do modelo e o que é da aplicação
+
+O modelo **só sugere filtros de conteúdo** (`doc_types` e `plan`). Os filtros seguros
+são fixos na aplicação e o modelo nunca decide sobre eles:
+
+```python
+SAFE_FILTERS = {"tenant": "fcai", "product": "fcai-cloud", "status": "published"}
 ```
 
-O modelo é instruído a responder **somente com base no documento** e a dizer quando o
-documento não tem informação suficiente. Isso **ainda não é RAG**: não há embeddings,
-chunking, retrieval nem pgvector — o documento inteiro simplesmente vai no prompt.
+Tenant, produto, status e autorização são responsabilidade da aplicação — deixar o
+modelo escolher isso seria abrir mão do controle de acesso.
 
-Essa abordagem funciona bem para **documentos pequenos**, mas começa a ficar limitada
-quando há muitos documentos, controle de permissões e versões, custo de tokens (o
-documento inteiro é enviado a cada pergunta) e necessidade de busca seletiva do
-trecho relevante — problemas que o RAG resolve nas próximas etapas.
+### O filtro é eliminatório: `doc_types` é uma lista generosa
 
-## Initial ingestion pipeline
+O filtro de metadados roda **antes** da busca semântica, como um `WHERE`: o que não
+passa nele não pode ser recuperado, nem que contenha exatamente a resposta. Como o
+filtro vem de um palpite do modelo, ele precisa ser generoso — o planner lista **todos**
+os tipos que podem conter a resposta, não um único:
 
-Pipeline inicial que lê e valida os documentos da `knowledge_base/`:
+| Pergunta | `doc_types` | Onde a resposta mora |
+| --- | --- | --- |
+| Quanto custa o plano Pro? | `plan`, `policy` | seção de preço do `pro-plan.md` |
+| O Enterprise tem SSO e SCIM? | `plan`, `product` | `enterprise-plan.md` |
+| Tempo de resposta P1 no Enterprise? | `plan`, `sla` | `enterprise-plan.md` + `product-support-sla.md` |
 
-```bash
-python -m app.ingest
+Quando não dá para saber, a lista fica vazia e **nenhum filtro de tipo é aplicado**.
+Filtro aumenta a precisão e derruba o recall; na dúvida, é melhor buscar em tudo.
+
+Pelo mesmo motivo, o catálogo de tipos no prompt do planner descreve o que cada tipo
+**realmente contém**, não o que o nome sugere — `sla` também cobre canais de
+atendimento e janelas de manutenção; `company` também cobre os e-mails de contato de
+todos os departamentos. O planner só enxerga a base por esse catálogo.
+
+### Quando o planner pede esclarecimento
+
+Só quando a pergunta tem mais de uma leitura razoável, cada uma levando a uma resposta
+diferente. Dois casos que parecem iguais são tratados de forma diferente:
+
+- pergunta que **aponta para um plano específico sem nomear** ("o meu plano", "o plano
+  da empresa") → ambígua: pede esclarecimento em vez de chutar;
+- pergunta que **não menciona plano nenhum** → uma leitura só, cuja resposta apenas
+  varia por plano: `plan=null` e a resposta cobre todos.
+
+### O contrato entre o planner e o índice
+
+`DocType` e `Plan` são `Literal`s: o structured output garante que o planner nunca
+inventa um tipo. O outro lado dessa garantia: um `doc_type` novo indexado que o planner
+não conhece nunca pode ser escolhido — os documentos dele sumiriam de toda busca
+filtrada, silenciosamente. Por isso o chat valida o contrato na largada
+(`ensure_planner_covers_index()`): os valores distintos de `doc_type` e `plan` do
+índice são comparados com o que o planner conhece, e o chat encerra com instrução clara
+quando há algo desconhecido:
+
+```
+The index has metadata the planner does not know: faq. Update DocType/Plan and the
+catalog in PLANNER_SYSTEM_PROMPT (app/query_planner.py).
 ```
 
-O script localiza os arquivos `.md`, extrai o front matter (via `python-frontmatter`),
-valida os metadados obrigatórios (`title`, `tenant`, `product`, `plan`, `doc_type`,
-`version`, `status`, `visibility`) e falha com erro claro se a pasta não existir, se
-nenhum documento for encontrado ou se algum documento tiver front matter/metadados
-inválidos.
+### Decisões de design
 
-## Chunk generation
+- **`temperature=0`** — o planner é um classificador: a mesma pergunta tem que produzir
+  o mesmo plano, inclusive na decisão de pedir esclarecimento.
+- **`TOP_K=8`** — sem reranking nem busca híbrida, o top-k é o único botão de recall; o
+  modelo de resposta ignora bem chunks irrelevantes a mais, então o custo deles no
+  contexto é menor que o custo de cortar a resposta fora.
 
-O mesmo comando agora também **gera chunks** dos documentos, preservando os metadados:
+## Retrieval isolado
 
-```bash
-python -m app.ingest
-```
-
-O chunking usa os splitters do LangChain: primeiro o `MarkdownHeaderTextSplitter`
-preserva a estrutura por seções (`#`, `##`, `###`) e depois o
-`RecursiveCharacterTextSplitter` (`chunk_size=900`, `chunk_overlap=150`) divide seções
-grandes. Cada chunk mantém os metadados do documento e adiciona `chunk_id`,
-`source_file`, `chunk_index`, `section` e `content_length`.
-
-Os chunks são salvos em `data/chunks.jsonl` (uma linha JSON por chunk; a pasta `data/`
-é criada automaticamente e não é versionada).
-
-## Indexing chunks
-
-Gera embeddings dos chunks e os indexa no Postgres com pgvector:
-
-```bash
-python -m app.index
-```
-
-O script lê `data/chunks.jsonl`, cria um `Document` do LangChain por chunk
-(preservando os metadados), gera embeddings com `OpenAIEmbeddings`
-(`OPENAI_EMBEDDING_MODEL`) e salva tudo no Postgres usando a API atual do
-`langchain-postgres` — `PGEngine` + `PGVectorStore` — na tabela
-`fcai_knowledge_base`, usando `chunk_id` como id. A tabela é recriada a cada execução
-(`overwrite_existing=True`), então rodar o script mais de uma vez **não gera
-duplicidade**.
-
-Ainda **não há retrieval nem resposta com RAG** nesta etapa — apenas a indexação.
-
-## Isolated retrieval
-
-Testa o retrieval isoladamente: faz a pergunta, busca os chunks mais relevantes no
-Postgres (pgvector) e imprime os resultados — **sem chamar o modelo de chat**.
+Para inspecionar a busca sem chamar o modelo de chat:
 
 ```bash
 python -m app.retrieve "Qual é o SLA para incidentes P1 no plano Enterprise?"
+python -m app.retrieve "Qual é o SLA para P1?" --top-k 5 --doc-type sla --plan all
 ```
 
-Se nenhuma pergunta for passada como argumento, ela é pedida interativamente. Use
-`--top-k` para mudar quantos chunks retornar (padrão 5):
+Aceita `--top-k` e filtros por metadados (`--tenant`, `--product`, `--plan`,
+`--doc-type`, `--status`). Para cada resultado imprime score, `chunk_id`, arquivo,
+título, seção, plano, tipo, versão, status e um trecho do conteúdo. Útil para verificar
+se o contexto certo está sendo recuperado e para observar o efeito dos filtros — a
+mesma pergunta com um `--doc-type` errado mostra, na prática, o filtro eliminatório
+escondendo a resposta.
 
-```bash
-python -m app.retrieve "Qual é o SLA para P1?" --top-k 5
-```
+## Utilitários de comparação
 
-Filtros simples por metadados (`--tenant`, `--product`, `--plan`, `--doc-type`,
-`--status`) podem ser combinados:
+- `python -m app.chat` — chat **sem RAG**: envia a pergunta direto ao modelo, com
+  streaming. Linha de base para comparar com as respostas do RAG.
+- `python -m app.context_chat [arquivo.md]` — chat com **um documento inteiro no
+  prompt** (sem embeddings nem retrieval). Funciona para documentos pequenos e mostra o
+  limite que o RAG resolve: muitos documentos, custo de tokens e busca seletiva.
 
-```bash
-python -m app.retrieve "Qual é o SLA para P1?" --product fcai-cloud --status published
-```
+## Knowledge base
 
-Para cada resultado são exibidos score, `chunk_id`, arquivo de origem, título, seção,
-plano, tipo, versão, status e um trecho do conteúdo. Esta etapa serve para inspecionar
-se o retrieval encontrou o contexto certo antes de conectar ao LLM — **ainda não há
-resposta com RAG**. É preciso ter rodado `python -m app.ingest` e `python -m app.index`
-antes.
+Os documentos ficam em `knowledge_base/`: oito arquivos Markdown em português sobre a
+FCAI, cobrindo informações da empresa (`company`), visão geral do produto (`product`),
+políticas comercial e de faturamento (`policy`), SLA de suporte (`sla`) e um documento
+por plano — Starter, Pro e Enterprise (`plan`).
 
-## RAG chat
+Todo documento tem front matter YAML com os metadados obrigatórios. `plan: all` marca
+documentos válidos para qualquer plano — o filtro de plano usa `plan IN [plano, "all"]`
+para que eles nunca sejam descartados.
 
-Primeira versão do chat com RAG no terminal:
+### Adicionando documentos
 
-```bash
-python -m app.rag_chat
-```
+1. Crie o `.md` em `knowledge_base/` com o front matter completo.
+2. Se o documento introduz um `doc_type` ou `plan` novo, atualize os `Literal`s
+   `DocType`/`Plan` **e** o catálogo em `PLANNER_SYSTEM_PROMPT`
+   (`app/query_planner.py`) — a validação de startup aponta exatamente isso se você
+   esquecer.
+3. Regere e reindexe (idempotente): `python -m app.ingest && python -m app.index`.
 
-Para cada pergunta, o chat **busca os chunks mais relevantes no pgvector** (top-k 5,
-com filtros `tenant=fcai`, `product=fcai-cloud`, `status=published`), **monta um
-contexto simples** com os trechos recuperados (preservando `source_file`, `title`,
-`section` e `version`) e **chama o modelo** com esse contexto, instruído a responder
-apenas com base nele — dizendo que não há informação suficiente quando o contexto não
-sustentar a resposta.
+## Possibilidades de uso
 
-É preciso ter rodado `python -m app.ingest` e `python -m app.index` antes. Digite `exit`
-ou `quit` para sair.
-
-## RAG answer with sources
-
-O chat responde com **Answer** e **Sources**:
-
-```bash
-python -m app.rag_chat
-```
-
-O modelo retorna uma **saída estruturada** (`answer`, `has_answer`, `used_chunk_ids`)
-via `with_structured_output`. As **fontes não são escritas pelo modelo**: a aplicação as
-monta a partir dos `used_chunk_ids` cruzados com os metadados dos chunks realmente
-recuperados (`source_file`, `title`, `section`, `version`). IDs inventados são
-descartados. Quando o contexto não sustenta a resposta (ou nada é recuperado), o chat
-responde que não há informação suficiente e imprime `Sources: No sources.` — sem chamar
-o modelo no caso de retrieval vazio.
-
-Para inspecionar o prompt final enviado ao modelo (system com o contexto + human com a
-pergunta):
-
-```bash
-python -m app.rag_chat --show-prompt
-```
-
-Para inspecionar os chunks recuperados antes da resposta (rank, score, `chunk_id`,
-arquivo, título, seção, versão e preview):
-
-```bash
-python -m app.rag_chat --debug
-```
-
-Ainda **não há API, frontend, streaming nem histórico de conversa**.
-
-## Improving retrieval
-
-Um chunk tirado do meio de um documento pode conter a resposta mas perder o contexto
-(de qual documento veio, qual seção, plano, tipo e versão). Para resolver isso, o
-`ingest.py` agora prefixa cada chunk com um **cabeçalho de contexto** antes de indexar:
-
-```
-Document title: SLA de Suporte ao Produto
-Document type: sla
-Product: fcai-cloud
-Plan: all
-Version: 2026-01
-Section: Créditos de SLA
-
-<conteúdo original do chunk>
-```
-
-Esse cabeçalho é o que o **embedding enxerga**, então o chunk fica autoexplicativo tanto
-para a busca quanto para o prompt final. Os metadados continuam sendo salvos
-separadamente (`chunk_id`, `source_file`, `title`, `section`, `tenant`, `product`,
-`plan`, `doc_type`, `version`, `status`, `visibility`).
-
-Para aplicar, regere os chunks e reindexe (a reindexação continua idempotente):
-
-```bash
-python -m app.ingest
-python -m app.index
-```
-
-### Demonstração antes/depois
-
-A flag `--no-context-header` no `ingest` regera os chunks **sem** o cabeçalho, do jeito
-antigo. Isso permite um A/B usando o próprio pipeline:
-
-```bash
-# ANTES: chunks sem cabeçalho de contexto
-python -m app.ingest --no-context-header
-python -m app.index
-python -m app.retrieve "Quais são os limites do plano Pro?" --top-k 3
-
-# DEPOIS: chunks com cabeçalho de contexto
-python -m app.ingest
-python -m app.index
-python -m app.retrieve "Quais são os limites do plano Pro?" --top-k 3
-```
-
-Exemplo real de diferença nessa pergunta:
-
-| | Top 3 recuperado |
-| --- | --- |
-| **Antes** | `billing-policy` (Cobrança por Consumo Excedente, Exemplo de Cálculo, Cartão de Crédito) — nenhum chunk sobre planos |
-| **Depois** | `enterprise-plan` (Diferenças entre Starter/Pro/Enterprise, FAQ, Benefícios) — a tabela comparativa de planos |
-
-O motivo: o `MarkdownHeaderTextSplitter` remove a linha do cabeçalho do conteúdo, então
-o chunk da seção "Pro" ficava sem a palavra "Pro" no texto — e **metadados não entram no
-embedding**, só no filtro e no prompt. Com o cabeçalho, o embedding passa a enxergar
-título, seção, plano, tipo e versão.
-
-### Casos de teste manuais
-
-Rode com `--debug` para comparar antes/depois e observar se os chunks recuperados agora
-carregam título, seção, plano, tipo de documento e versão no preview:
-
-```bash
-python -m app.rag_chat --debug
-```
-
-Perguntas sugeridas:
-
-- Qual é o tempo de resposta para P1 no plano Enterprise?
-- Qual crédito de SLA é aplicado quando a disponibilidade fica entre 98,0% e 99,0%?
-- O Enterprise tem SSO e SCIM?
-- O que acontece se eu ultrapassar a cota de ingestão?
-- Como funciona o pagamento corporativo no Enterprise?
-
-Ainda **não há busca híbrida (BM25), reranking nem query rewriting** — o foco desta
-etapa é só resolver o chunk sem contexto com uma melhoria simples na ingestão.
+- **Assistente de suporte interno** sobre a documentação de uma empresa ou produto —
+  troque os documentos de `knowledge_base/`, ajuste os metadados e os `SAFE_FILTERS`.
+- **Bancada de experimentação de RAG** — cada módulo roda isolado (retrieval sem LLM,
+  chat sem RAG, documento inteiro no prompt, RAG completo), o que permite comparar
+  abordagens e medir o efeito de cada peça (cabeçalho de contexto, filtros, query
+  planner) com as flags de debug.
+- **Base para evoluções** — busca híbrida (BM25), reranking, API e frontend, histórico
+  de conversa, streaming da resposta e reindexação incremental são extensões naturais
+  sobre esta estrutura; nenhuma está implementada.
 
 ## Estrutura
 
 ```
 app/
-  config.py   # carrega e valida variáveis de ambiente
-  db.py       # conexão com Postgres e extensão pgvector
-  main.py     # script de validação do ambiente
-  chat.py     # chat de terminal sem RAG (chama o modelo diretamente)
+  config.py        # carrega e valida variáveis de ambiente
+  db.py            # conexão com Postgres e extensão pgvector
+  main.py          # script de validação do ambiente
+  chat.py          # chat sem RAG (linha de base)
   context_chat.py  # chat com um documento inteiro no prompt (sem RAG)
-  ingest.py   # lê, valida e gera chunks da knowledge_base (sem embeddings)
-  index.py    # gera embeddings dos chunks e indexa no pgvector (sem retrieval)
-  retrieve.py # busca chunks relevantes no pgvector e imprime (sem resposta RAG)
-  rag_chat.py # chat com RAG: retrieval + contexto + chamada ao modelo
-knowledge_base/
-  company-info.md
-  product-overview.md
-  commercial-policy.md
-  product-support-sla.md
-  enterprise-plan.md
-  billing-policy.md
+  ingest.py        # lê, valida e gera chunks da knowledge_base
+  index.py         # gera embeddings e indexa no pgvector
+  retrieve.py      # busca isolada no pgvector, com filtros (sem resposta RAG)
+  query_planner.py # planeja a busca: entende a pergunta, monta os filtros e busca
+  rag_chat.py      # o chat: query plan + retrieval + resposta com fontes
+knowledge_base/    # documentos Markdown com front matter de metadados
 docker-compose.yml
 requirements.txt
 .env.example

@@ -24,6 +24,16 @@ REQUIRED_METADATA = [
     "visibility",
 ]
 
+# Metadata that gets prepended to the chunk text, so it reaches the embedding.
+CONTEXT_HEADER_FIELDS = [
+    ("Document title", "title"),
+    ("Document type", "doc_type"),
+    ("Product", "product"),
+    ("Plan", "plan"),
+    ("Version", "version"),
+    ("Section", "section"),
+]
+
 HEADERS_TO_SPLIT_ON = [
     ("#", "h1"),
     ("##", "h2"),
@@ -81,17 +91,12 @@ def section_of(header_metadata: dict) -> str | None:
     return None
 
 
-def build_context_header(metadata: dict, section: str | None) -> str:
-    lines = [
-        f"Document title: {metadata.get('title')}",
-        f"Document type: {metadata.get('doc_type')}",
-        f"Product: {metadata.get('product')}",
-        f"Plan: {metadata.get('plan')}",
-        f"Version: {metadata.get('version')}",
-    ]
-    if section:
-        lines.append(f"Section: {section}")
-    return "\n".join(lines)
+def build_context_header(metadata: dict) -> str:
+    return "\n".join(
+        f"{label}: {metadata[key]}"
+        for label, key in CONTEXT_HEADER_FIELDS
+        if metadata.get(key)
+    )
 
 
 def chunk_document(
@@ -120,13 +125,11 @@ def chunk_document(
         metadata["chunk_index"] = index
         metadata["section"] = section_of(piece.metadata)
 
-        # Prepend a short context header to the indexed text, so a chunk taken out
-        # of the middle of a document still states which document, section, plan
-        # and version it belongs to. This is what the embedding actually sees.
+        # Metadata alone never reaches the embedding, so the header is prepended to
+        # the text itself: a chunk from the middle of a document stays self-explanatory.
         content = piece.page_content
         if context_header:
-            header = build_context_header(post.metadata, metadata["section"])
-            content = f"{header}\n\n{content}"
+            content = f"{build_context_header(metadata)}\n\n{content}"
 
         metadata["content_length"] = len(content)
         chunks.append({"content": content, "metadata": metadata})
