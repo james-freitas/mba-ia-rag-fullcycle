@@ -1,7 +1,8 @@
-"""RAG chat: plans the query, retrieves the chunks and answers using only them.
+"""RAG chat: plans the query, retrieves chunks, reranks them and answers.
 
-The planning step lives in app/query_planner.py. This file owns the conversation:
-the final prompt, the structured answer, the sources and everything printed on screen.
+The planning step lives in app/query_planner.py and the reranking in app/rerank.py.
+This file owns the conversation: the final prompt, the structured answer, the
+sources and everything printed on screen.
 """
 
 import argparse
@@ -20,6 +21,15 @@ from app.query_planner import (
     ensure_planner_covers_index,
     format_query_plan,
     search_chunks,
+)
+from app.rerank import (
+    RERANK_PROMPT,
+    RERANK_TOP_N,
+    RerankResult,
+    format_rerank_candidates,
+    print_rerank_debug,
+    select_documents_by_ids,
+    select_reranked_documents,
 )
 from app.retrieve import connect_store, ensure_collection_ready, print_chunk
 
@@ -84,14 +94,7 @@ def print_debug(results: list[tuple[Document, float]]) -> None:
 
 
 def print_sources(documents: list[Document], used_chunk_ids: list[str]) -> None:
-    documents_by_id = {
-        document.metadata.get("chunk_id"): document for document in documents
-    }
-    sources = []
-    for chunk_id in used_chunk_ids:
-        document = documents_by_id.get(chunk_id)
-        if document is not None and document not in sources:
-            sources.append(document)
+    sources = select_documents_by_ids(documents, used_chunk_ids)
 
     print("\nSources:")
     if not sources:
@@ -123,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RAG chat.")
     parser.add_argument("--show-prompt", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--no-rerank", action="store_true")
     return parser.parse_args()
 
 
@@ -143,6 +147,7 @@ def main() -> None:
         temperature=0,
     )
     planner = model.with_structured_output(QueryPlan)
+    reranker = model.with_structured_output(RerankResult)
     answerer = model.with_structured_output(RagAnswer)
 
     print("RAG chat started.")
@@ -177,7 +182,31 @@ def main() -> None:
             print_no_answer()
             continue
 
-        documents = [document for document, _ in results]
+        if args.no_rerank:
+            documents = [document for document, _ in results[:RERANK_TOP_N]]
+        else:
+            rerank_prompt_value = RERANK_PROMPT.invoke(
+                {
+                    "candidates": format_rerank_candidates(results),
+                    "question": question,
+                    "normalized_question": query_plan.normalized_question,
+                    "exact_terms": ", ".join(query_plan.exact_terms) or "none",
+                }
+            )
+            if args.show_prompt:
+                print_prompt(rerank_prompt_value, "Reranker prompt")
+
+            rerank_result = reranker.invoke(rerank_prompt_value)
+            documents = select_reranked_documents(
+                results, rerank_result.selected_chunk_ids
+            )
+            if args.debug:
+                print_rerank_debug(rerank_result, documents)
+
+            if not documents:
+                print_no_answer()
+                continue
+
         prompt_value = ANSWER_PROMPT.invoke(
             {"context": format_context(documents), "question": question}
         )

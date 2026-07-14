@@ -24,15 +24,18 @@ busca vetorial no pgvector
    (pergunta normalizada + termos exatos, com filtros de metadados)
    │
    ▼
+reranking (modelo, structured output)
+   │        └── nenhum chunk sustenta a resposta? → responde "não encontrei" e para
+   ▼
 modelo de resposta (structured output)
    │
    ▼
 Answer + Sources (as fontes são montadas pela aplicação, não pelo modelo)
 ```
 
-O modelo de chat é chamado em exatamente dois pontos: no query planner e na resposta
-final. Ingestão e indexação não chamam o modelo de chat — apenas o modelo de
-embeddings.
+O modelo de chat é chamado em exatamente três pontos: no query planner, no reranking e
+na resposta final. Ingestão e indexação não chamam o modelo de chat — apenas o modelo
+de embeddings.
 
 ## Requisitos
 
@@ -98,8 +101,9 @@ idempotente: rodar de novo não duplica nada.
 
 ```bash
 python -m app.rag_chat                # o chat com RAG
-python -m app.rag_chat --debug        # imprime o QueryPlan, os filtros e os chunks recuperados
-python -m app.rag_chat --show-prompt  # imprime o prompt do planner e o prompt final
+python -m app.rag_chat --debug        # imprime o QueryPlan, os chunks recuperados e os selecionados
+python -m app.rag_chat --show-prompt  # imprime os prompts do planner, do reranker e da resposta
+python -m app.rag_chat --no-rerank    # pula o reranking (usa os 4 primeiros do retrieval)
 ```
 
 Digite `exit` ou `quit` para sair.
@@ -199,9 +203,29 @@ catalog in PLANNER_SYSTEM_PROMPT (app/query_planner.py).
 
 - **`temperature=0`** — o planner é um classificador: a mesma pergunta tem que produzir
   o mesmo plano, inclusive na decisão de pedir esclarecimento.
-- **`TOP_K=8`** — sem reranking nem busca híbrida, o top-k é o único botão de recall; o
-  modelo de resposta ignora bem chunks irrelevantes a mais, então o custo deles no
-  contexto é menor que o custo de cortar a resposta fora.
+- **`TOP_K=8`** — o retrieval é generoso de propósito: traz candidatos de sobra para o
+  reranking escolher, em vez de cortar a resposta fora antes da hora.
+
+## Reranking
+
+O retrieval otimiza **recall**: traz até 8 candidatos que podem ajudar. O reranking
+(`app/rerank.py`) otimiza **precisão**: uma chamada ao modelo com structured output
+(`RerankResult`) recebe a pergunta original, a pergunta normalizada, os termos exatos e
+os candidatos, e seleciona **no máximo 4 chunk_ids** que ajudam diretamente a responder
+— preferindo chunks específicos a genéricos e chunks que contêm os termos exatos.
+Só os selecionados entram no prompt final e nas fontes.
+
+O reranker também funciona como portão de segurança: quando nenhum candidato sustenta a
+resposta, ele devolve uma lista vazia e o chat responde "não encontrei" **sem chamar o
+modelo final** — os candidatos irrelevantes nunca chegam ao prompt de resposta. IDs
+fora dos candidatos são descartados pela aplicação, no mesmo padrão das fontes.
+
+Para inspecionar e comparar:
+
+- `--debug` mostra os chunks recuperados (candidatos) e, em seguida, os selecionados;
+- `--show-prompt` mostra os três prompts, na ordem: planner, reranker e resposta final;
+- `--no-rerank` pula o reranking e envia os 4 primeiros do retrieval direto ao prompt
+  final — útil para comparar os dois fluxos com a mesma pergunta.
 
 ## Retrieval isolado
 
@@ -255,8 +279,8 @@ para que eles nunca sejam descartados.
   chat sem RAG, documento inteiro no prompt, RAG completo), o que permite comparar
   abordagens e medir o efeito de cada peça (cabeçalho de contexto, filtros, query
   planner) com as flags de debug.
-- **Base para evoluções** — busca híbrida (BM25), reranking, API e frontend, histórico
-  de conversa, streaming da resposta e reindexação incremental são extensões naturais
+- **Base para evoluções** — busca híbrida (BM25), API e frontend, histórico de
+  conversa, streaming da resposta e reindexação incremental são extensões naturais
   sobre esta estrutura; nenhuma está implementada.
 
 ## Estrutura
@@ -272,7 +296,8 @@ app/
   index.py         # gera embeddings e indexa no pgvector
   retrieve.py      # busca isolada no pgvector, com filtros (sem resposta RAG)
   query_planner.py # planeja a busca: entende a pergunta, monta os filtros e busca
-  rag_chat.py      # o chat: query plan + retrieval + resposta com fontes
+  rerank.py        # seleciona quais chunks recuperados entram no prompt final
+  rag_chat.py      # o chat: query plan + retrieval + reranking + resposta com fontes
 knowledge_base/    # documentos Markdown com front matter de metadados
 docker-compose.yml
 requirements.txt
