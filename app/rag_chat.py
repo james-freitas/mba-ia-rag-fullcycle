@@ -64,13 +64,37 @@ def print_selected_chunks(selected_chunk_ids: list[str]) -> None:
     print("--- End of selected chunks ---")
 
 
+def format_ms(value: float | None) -> str:
+    return f"{value} ms" if value is not None else "-"
+
+
+def print_pipeline_debug(debug: RagDebug) -> None:
+    timings = debug.timings
+    print("\n--- Pipeline debug ---")
+    print(f"Request ID: {debug.request_id}")
+    print("Timings:")
+    print(f"  Query planning: {format_ms(timings.query_planning_ms)}")
+    print(f"  Retrieval: {format_ms(timings.retrieval_ms)}")
+    print(f"  Reranking: {format_ms(timings.reranking_ms)}")
+    print(f"  Answer generation: {format_ms(timings.answer_generation_ms)}")
+    print(f"  Total: {format_ms(timings.total_ms)}")
+    if debug.model_usage:
+        print("Model usage:")
+        for usage in debug.model_usage:
+            print(
+                f"  {usage.model}: {usage.input_tokens} input + "
+                f"{usage.output_tokens} output = {usage.total_tokens} tokens"
+            )
+    print("--- End of pipeline debug ---")
+
+
 def print_debug(debug: RagDebug) -> None:
     print_query_plan(debug.query_plan)
-    if debug.query_plan.needs_clarification:
-        return
-    print_retrieved_chunks(debug.retrieved_chunks)
-    if debug.retrieved_chunks:
-        print_selected_chunks(debug.selected_chunk_ids)
+    if not debug.query_plan.needs_clarification:
+        print_retrieved_chunks(debug.retrieved_chunks)
+        if debug.retrieved_chunks:
+            print_selected_chunks(debug.selected_chunk_ids)
+    print_pipeline_debug(debug)
 
 
 def print_sources(sources: list[Source]) -> None:

@@ -193,6 +193,30 @@ nunca pelo modelo, e a API não expõe prompts nem segredos.
 O arquivo `test.http` na raiz tem todos esses requests prontos para a extensão
 **REST Client** do VS Code.
 
+## Pipeline observability
+
+Cada execução do pipeline gera um `request_id` (UUID), mede o tempo de cada etapa
+(`query_planning_ms`, `retrieval_ms`, `reranking_ms`, `answer_generation_ms`,
+`total_ms`) e agrega os tokens consumidos por modelo (`model_usage`, via
+`UsageMetadataCallbackHandler` do LangChain — o custo não é calculado porque o
+LangChain não fornece preços, apenas tokens).
+
+- **Na API**, `debug=true` retorna as informações de diagnóstico: `request_id`,
+  `query_plan`, `retrieved_chunks`, `selected_chunk_ids`, `timings` e
+  `model_usage`. Com `debug=false` a resposta continua enxuta, sem nada disso.
+- **No terminal**, `--debug` mostra o query plan, os chunks recuperados, os
+  selecionados e um bloco `Pipeline debug` com o `request_id`, os tempos e os
+  tokens por modelo.
+- **Logs estruturados**: toda execução emite uma linha JSON no stdout com
+  `request_id`, `has_answer`, `needs_clarification`, `used_rerank`, contagens de
+  chunks, `source_files`, `timings` e `model_usage` (tokens por modelo) — o
+  suficiente para auditar o pipeline **sem**
+  expor prompts, contexto completo, documentos ou credenciais. Em caso de erro, a
+  linha traz `error_type` e `error_message`, e a API responde `500` com uma mensagem
+  genérica (sem stack trace).
+- Ingestão e indexação continuam separadas do runtime: observabilidade não muda o
+  fato de que o chat e a API apenas consultam o índice existente.
+
 ## O query planner
 
 A pergunta que o usuário digita quase nunca é a melhor pergunta para buscar no banco.

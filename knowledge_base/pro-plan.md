@@ -15,7 +15,7 @@ O plano **Pro** do FCAI Cloud é o plano pago self-service, voltado para times e
 produção que precisam de limites maiores, SLA de suporte em horário comercial e
 cobrança previsível por cartão. Este documento detalha para quem o plano é indicado,
 seus limites, recursos, segurança, suporte, condições comerciais, disponibilidade e as
-diferenças em relação aos planos Starter e Enterprise. Todos os números são fictícios.
+diferenças em relação aos planos Starter e Enterprise. Todos os números são fictícios!
 
 ## Para Quem é o Pro
 

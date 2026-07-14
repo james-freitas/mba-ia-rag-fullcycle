@@ -26,7 +26,8 @@ Content-Type: application/json
 
 {
   "question": "Quais formas de pagamento o FCAI Cloud aceita?",
-  "use_rerank": false
+  "use_rerank": false,
+  "debug": true
 }
 
 ### Chat: ambiguous question (returns needs_clarification=true)

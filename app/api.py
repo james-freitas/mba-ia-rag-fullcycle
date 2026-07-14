@@ -30,8 +30,12 @@ def chat(request: ChatRequest) -> RagPipelineResult:
     if not question:
         raise HTTPException(status_code=400, detail="question must not be empty")
 
-    return pipeline.run(
-        question,
-        use_rerank=request.use_rerank,
-        include_debug=request.debug,
-    )
+    try:
+        return pipeline.run(
+            question,
+            use_rerank=request.use_rerank,
+            include_debug=request.debug,
+        )
+    except Exception:
+        # The pipeline already logged request_id, error type and message.
+        raise HTTPException(status_code=500, detail="RAG pipeline failed.")
