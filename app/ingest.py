@@ -9,6 +9,8 @@ from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
 )
 
+from app.manifest import document_hash
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "knowledge_base"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "chunks.jsonl"
@@ -49,11 +51,11 @@ class IngestionError(Exception):
 
 
 def load_document(path: Path) -> frontmatter.Post:
-    raw = path.read_text(encoding="utf-8").strip()
-    if not raw:
+    raw = path.read_text(encoding="utf-8")
+    if not raw.strip():
         raise IngestionError(f"{path.name}: file is empty")
 
-    post = frontmatter.loads(raw)
+    post = frontmatter.loads(raw.strip())
     if not post.metadata:
         raise IngestionError(f"{path.name}: missing YAML front matter")
 
@@ -66,6 +68,9 @@ def load_document(path: Path) -> frontmatter.Post:
     if not post.content.strip():
         raise IngestionError(f"{path.name}: document body is empty")
 
+    # Hash of the complete file (front matter included), so any edit marks
+    # the document as changed for the incremental indexer.
+    post.metadata["document_hash"] = document_hash(raw)
     return post
 
 
@@ -120,7 +125,11 @@ def chunk_document(
         # Start from the document's front matter metadata and enrich each chunk
         # with its own identity (id/index), origin (source_file/section) and size.
         metadata = dict(post.metadata)
-        metadata["chunk_id"] = f"{path.stem}-{index}"
+        # Deterministic id: same file + same content + same position = same id,
+        # so reindexing never duplicates and a changed document gets new ids.
+        metadata["chunk_id"] = (
+            f"{path.stem}-{metadata['document_hash'][:12]}-{index:04d}"
+        )
         metadata["source_file"] = path.name
         metadata["chunk_index"] = index
         metadata["section"] = section_of(piece.metadata)

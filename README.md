@@ -85,7 +85,7 @@ erro claro quando algo está faltando. O chunking preserva a estrutura do Markdo
 (`MarkdownHeaderTextSplitter` por seções, depois `RecursiveCharacterTextSplitter` com
 `chunk_size=900` e `chunk_overlap=150`), e cada chunk carrega os metadados do documento
 mais os seus próprios (`chunk_id`, `source_file`, `chunk_index`, `section`,
-`content_length`).
+`content_length`, `document_hash`).
 
 Cada chunk é prefixado com um **cabeçalho de contexto** (título, tipo, produto, plano,
 versão e seção) antes de ser indexado. Metadados não entram no embedding — só no filtro
@@ -93,9 +93,40 @@ versão e seção) antes de ser indexado. Metadados não entram no embedding —
 autoexplicativo para a busca e para o prompt final. A flag `--no-context-header` gera
 os chunks sem o cabeçalho, útil para comparar a qualidade do retrieval com e sem ele.
 
-O `index` recria a tabela `fcai_knowledge_base` a cada execução usando `chunk_id` como
-id (`PGEngine` + `PGVectorStore`, API atual do `langchain-postgres`), então reindexar é
-idempotente: rodar de novo não duplica nada.
+O `index` grava os chunks na tabela `fcai_knowledge_base` usando `chunk_id` como id
+(`PGEngine` + `PGVectorStore`, API atual do `langchain-postgres`) e reindexa **apenas o
+que mudou** desde a última execução — veja a seção a seguir.
+
+## Incremental indexing
+
+O índice do pgvector se mantém consistente quando documentos mudam, sem nunca
+reindexar tudo:
+
+- `python -m app.ingest` gera `data/chunks.jsonl` com um `document_hash` (SHA256 do
+  arquivo completo, front matter incluído) em cada chunk. O `chunk_id` é
+  **determinístico** — `arquivo` + prefixo do hash + posição, ex.:
+  `product-support-sla-8f3a91c2b4d0-0001` — então o mesmo conteúdo sempre produz os
+  mesmos ids, e um documento editado produz ids novos.
+- `python -m app.index` compara os chunks atuais com o manifest da última indexação
+  (`data/index_manifest.json`) e classifica cada documento:
+
+  | Estado | Ação |
+  |---|---|
+  | `new` | indexa os chunks do documento |
+  | `changed` | deleta os chunks antigos (ids do manifest) e indexa os novos |
+  | `removed` | deleta os chunks antigos do índice |
+  | `unchanged` | não faz nada (nenhuma chamada de embedding) |
+
+- Ao final, o manifest é regravado com o estado atual (hash, metadados e `chunk_ids`
+  por documento). Rodar `index` duas vezes seguidas não duplica nada e não gasta
+  embeddings; alterar um documento substitui só os chunks dele; remover um documento
+  (e rodar `ingest` + `index`) limpa os chunks órfãos do índice.
+- `python -m app.index --force` deleta todos os chunks registrados no manifest e
+  reindexa todos os chunks atuais, recriando o índice do zero.
+- Sem manifest (primeira indexação) a tabela é recriada do zero, pois não há como
+  saber o que existe nela.
+- O chat **nunca** reindexa documentos em runtime: indexação acontece só via
+  `app.ingest` + `app.index`.
 
 ## Usando o chat
 
@@ -269,7 +300,8 @@ para que eles nunca sejam descartados.
    `DocType`/`Plan` **e** o catálogo em `PLANNER_SYSTEM_PROMPT`
    (`app/query_planner.py`) — a validação de startup aponta exatamente isso se você
    esquecer.
-3. Regere e reindexe (idempotente): `python -m app.ingest && python -m app.index`.
+3. Regere e reindexe: `python -m app.ingest && python -m app.index` — só o documento
+   novo/alterado é indexado (veja **Incremental indexing**).
 
 ## Possibilidades de uso
 
@@ -280,8 +312,8 @@ para que eles nunca sejam descartados.
   abordagens e medir o efeito de cada peça (cabeçalho de contexto, filtros, query
   planner) com as flags de debug.
 - **Base para evoluções** — busca híbrida (BM25), API e frontend, histórico de
-  conversa, streaming da resposta e reindexação incremental são extensões naturais
-  sobre esta estrutura; nenhuma está implementada.
+  conversa e streaming da resposta são extensões naturais sobre esta estrutura;
+  nenhuma está implementada.
 
 ## Estrutura
 
@@ -292,8 +324,9 @@ app/
   main.py          # script de validação do ambiente
   chat.py          # chat sem RAG (linha de base)
   context_chat.py  # chat com um documento inteiro no prompt (sem RAG)
-  ingest.py        # lê, valida e gera chunks da knowledge_base
-  index.py         # gera embeddings e indexa no pgvector
+  ingest.py        # lê, valida e gera chunks da knowledge_base (com document_hash)
+  index.py         # indexa no pgvector só o que mudou (new/changed/removed)
+  manifest.py      # hash de documentos e leitura/escrita do index_manifest.json
   retrieve.py      # busca isolada no pgvector, com filtros (sem resposta RAG)
   query_planner.py # planeja a busca: entende a pergunta, monta os filtros e busca
   rerank.py        # seleciona quais chunks recuperados entram no prompt final
