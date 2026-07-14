@@ -5,8 +5,11 @@ optimizes precision (keep only the chunks that actually answer the question).
 """
 
 from langchain_core.documents import Document
+from langchain_core.prompt_values import PromptValue
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
+
+from app.query_planner import QueryPlan
 
 RERANK_TOP_N = 4
 
@@ -62,6 +65,19 @@ def format_rerank_candidates(results: list[tuple[Document, float]]) -> str:
     return "\n\n".join(blocks)
 
 
+def build_rerank_prompt(
+    results: list[tuple[Document, float]], question: str, query_plan: QueryPlan
+) -> PromptValue:
+    return RERANK_PROMPT.invoke(
+        {
+            "candidates": format_rerank_candidates(results),
+            "question": question,
+            "normalized_question": query_plan.normalized_question,
+            "exact_terms": ", ".join(query_plan.exact_terms) or "none",
+        }
+    )
+
+
 def select_documents_by_ids(
     documents: list[Document], chunk_ids: list[str]
 ) -> list[Document]:
@@ -81,12 +97,3 @@ def select_reranked_documents(
 ) -> list[Document]:
     documents = [document for document, _ in results]
     return select_documents_by_ids(documents, selected_chunk_ids)[:RERANK_TOP_N]
-
-
-def print_rerank_debug(
-    rerank_result: RerankResult, selected_documents: list[Document]
-) -> None:
-    print("\n--- Rerank result ---")
-    print(f"Selected chunks: {', '.join(rerank_result.selected_chunk_ids) or None}")
-    print(f"Selected count: {len(selected_documents)}")
-    print("--- End of rerank result ---")

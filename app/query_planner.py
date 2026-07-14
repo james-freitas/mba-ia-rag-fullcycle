@@ -10,13 +10,13 @@ import sys
 from typing import Literal, get_args
 
 from langchain_core.documents import Document
+from langchain_core.prompt_values import PromptValue
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVectorStore
 from pydantic import BaseModel, Field
 
 from app.db import get_connection
 from app.index import TABLE_NAME
-from app.retrieve import format_filters
 
 # 8, not 5: with k=5 the right chunk kept missing the cut by one or two ranks.
 TOP_K = 8
@@ -104,6 +104,10 @@ class QueryPlan(BaseModel):
     )
 
 
+def build_planner_prompt(question: str) -> PromptValue:
+    return PLANNER_PROMPT.invoke({"question": question})
+
+
 def ensure_planner_covers_index() -> None:
     # DocType and Plan are a contract with the index: a value the planner cannot
     # produce never passes the filter, so its documents silently vanish from every
@@ -153,18 +157,3 @@ def search_chunks(
     return store.similarity_search_with_score(
         build_search_query(query_plan), k=TOP_K, filter=filters
     )
-
-
-def format_query_plan(query_plan: QueryPlan, filters: dict) -> str:
-    lines = [
-        "\n--- Query plan ---",
-        f"Normalized question: {query_plan.normalized_question}",
-        f"Doc types: {', '.join(query_plan.doc_types) or None}",
-        f"Plan: {query_plan.plan}",
-        f"Exact terms: {', '.join(query_plan.exact_terms) or None}",
-        f"Needs clarification: {query_plan.needs_clarification}",
-        f"Search query: {build_search_query(query_plan)}",
-        f"Filters: {format_filters(filters)}",
-        "--- End of query plan ---",
-    ]
-    return "\n".join(lines)

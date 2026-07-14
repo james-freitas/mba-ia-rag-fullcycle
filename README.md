@@ -37,6 +37,9 @@ O modelo de chat é chamado em exatamente três pontos: no query planner, no rer
 na resposta final. Ingestão e indexação não chamam o modelo de chat — apenas o modelo
 de embeddings.
 
+Esse fluxo vive em `app/rag_pipeline.py` e é o mesmo nos dois modos de uso: o chat de
+terminal (`app/rag_chat.py`) e a API HTTP (`app/api.py`).
+
 ## Requisitos
 
 - Python 3.11+
@@ -153,6 +156,42 @@ Perguntas para ver o planner trabalhando (com `--debug`):
 - Como funciona o suporte no plano da empresa? → ambígua, pede esclarecimento
 - Qual é o e-mail de suporte? → `doc_types` inclui `sla` (o e-mail mora no doc de SLA)
 - O que acontece se eu ultrapassar a cota de ingestão? → `plan=null`, resposta cobre os três planos
+
+## API
+
+O mesmo pipeline do terminal é exposto como uma API HTTP com FastAPI:
+
+```bash
+uvicorn app.api:app --reload
+```
+
+A API **não roda ingestão nem indexação** — o `/chat` apenas consulta o índice já
+criado no Postgres. Antes de usá-la, prepare a base:
+
+```bash
+python -m app.ingest
+python -m app.index
+```
+
+Endpoints:
+
+- `GET /health` → `{"status": "ok"}`
+- `POST /chat` → executa o pipeline completo (planner → retrieval → reranking → resposta)
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Qual é o SLA para incidentes P1 no plano Enterprise?"}'
+```
+
+Campos opcionais do request: `debug` (default `false`) inclui na resposta o query plan,
+os chunks recuperados e os `selected_chunk_ids`; `use_rerank` (default `true`) permite
+pular o reranking. Pergunta vazia retorna `400`; pergunta ambígua retorna a pergunta de
+esclarecimento com `needs_clarification=true`. As fontes são montadas pela aplicação,
+nunca pelo modelo, e a API não expõe prompts nem segredos.
+
+O arquivo `test.http` na raiz tem todos esses requests prontos para a extensão
+**REST Client** do VS Code.
 
 ## O query planner
 
@@ -311,9 +350,9 @@ para que eles nunca sejam descartados.
   chat sem RAG, documento inteiro no prompt, RAG completo), o que permite comparar
   abordagens e medir o efeito de cada peça (cabeçalho de contexto, filtros, query
   planner) com as flags de debug.
-- **Base para evoluções** — busca híbrida (BM25), API e frontend, histórico de
-  conversa e streaming da resposta são extensões naturais sobre esta estrutura;
-  nenhuma está implementada.
+- **Base para evoluções** — busca híbrida (BM25), frontend, histórico de conversa e
+  streaming da resposta são extensões naturais sobre esta estrutura; nenhuma está
+  implementada.
 
 ## Estrutura
 
@@ -330,8 +369,11 @@ app/
   retrieve.py      # busca isolada no pgvector, com filtros (sem resposta RAG)
   query_planner.py # planeja a busca: entende a pergunta, monta os filtros e busca
   rerank.py        # seleciona quais chunks recuperados entram no prompt final
-  rag_chat.py      # o chat: query plan + retrieval + reranking + resposta com fontes
+  rag_pipeline.py  # o pipeline RAG completo, compartilhado pelo terminal e pela API
+  rag_chat.py      # o chat no terminal, por cima do pipeline
+  api.py           # a API HTTP (FastAPI), por cima do pipeline
 knowledge_base/    # documentos Markdown com front matter de metadados
+test.http          # requests prontos para a extensão REST Client do VS Code
 docker-compose.yml
 requirements.txt
 .env.example

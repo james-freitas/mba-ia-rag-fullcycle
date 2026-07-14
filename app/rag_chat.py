@@ -1,82 +1,24 @@
-"""RAG chat: plans the query, retrieves chunks, reranks them and answers.
+"""RAG chat in the terminal, on top of the shared pipeline.
 
-The planning step lives in app/query_planner.py and the reranking in app/rerank.py.
-This file owns the conversation: the final prompt, the structured answer, the
-sources and everything printed on screen.
+The pipeline (planning, retrieval, reranking, answer, sources) lives in
+app/rag_pipeline.py. This file only owns the conversation loop and printing.
 """
 
 import argparse
 
-from langchain.chat_models import init_chat_model
-from langchain_core.documents import Document
 from langchain_core.prompt_values import PromptValue
-from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel, Field
 
-from app.config import settings
-from app.query_planner import (
-    PLANNER_PROMPT,
-    QueryPlan,
-    build_filters,
-    ensure_planner_covers_index,
-    format_query_plan,
-    search_chunks,
+from app.rag_pipeline import (
+    QueryPlanDebug,
+    RagDebug,
+    RagPipeline,
+    RetrievalChunkDebug,
+    Source,
 )
-from app.rerank import (
-    RERANK_PROMPT,
-    RERANK_TOP_N,
-    RerankResult,
-    format_rerank_candidates,
-    print_rerank_debug,
-    select_documents_by_ids,
-    select_reranked_documents,
-)
-from app.retrieve import connect_store, ensure_collection_ready, print_chunk
-
-PREVIEW_LIMIT = 300
-NO_ANSWER_MESSAGE = (
-    "Não encontrei informação suficiente na base de conhecimento "
-    "para responder com segurança."
-)
-FALLBACK_CLARIFICATION = "Pode detalhar melhor a sua pergunta?"
-
-SYSTEM_PROMPT = (
-    "You are a support assistant for FCAI. "
-    "Answer the user's question using ONLY the context below. "
-    "Do not use prior knowledge and do not invent information or sources.\n\n"
-    "Rules:\n"
-    "- Write 'answer' in Portuguese, objective and clear.\n"
-    "- Set 'has_answer' to true only if the context supports the answer.\n"
-    "- 'used_chunk_ids' must contain only Chunk IDs present in the context.\n"
-    f"- If the context is not enough, set 'has_answer' to false, set 'answer' to "
-    f"'{NO_ANSWER_MESSAGE}' and leave 'used_chunk_ids' empty.\n\n"
-    "Context:\n{context}"
-)
-
-ANSWER_PROMPT = ChatPromptTemplate.from_messages(
-    [("system", SYSTEM_PROMPT), ("human", "{question}")]
-)
+from app.retrieve import format_filters
 
 
-class RagAnswer(BaseModel):
-    answer: str = Field(description="Answer in Portuguese, based only on the context.")
-    has_answer: bool = Field(description="True only if the context supports the answer.")
-    used_chunk_ids: list[str] = Field(
-        description="Chunk IDs from the context that support the answer."
-    )
-
-
-def format_context(documents: list[Document]) -> str:
-    # The chunk text already carries title, section, plan and version (context header
-    # added at ingestion). The model only needs the id it must cite back.
-    blocks = [
-        f"[Chunk ID: {document.metadata.get('chunk_id')}]\nContent:\n{document.page_content}"
-        for document in documents
-    ]
-    return "\n\n".join(blocks)
-
-
-def print_prompt(prompt_value: PromptValue, label: str) -> None:
+def print_prompt(label: str, prompt_value: PromptValue) -> None:
     print(f"\n--- {label} ---")
     for message in prompt_value.to_messages():
         print(f"\n[{message.type}]")
@@ -84,42 +26,65 @@ def print_prompt(prompt_value: PromptValue, label: str) -> None:
     print(f"\n--- End of {label.lower()} ---")
 
 
-def print_debug(results: list[tuple[Document, float]]) -> None:
+def print_query_plan(plan: QueryPlanDebug) -> None:
+    print("\n--- Query plan ---")
+    print(f"Normalized question: {plan.normalized_question}")
+    print(f"Doc types: {', '.join(plan.doc_types) or None}")
+    print(f"Plan: {plan.plan}")
+    print(f"Exact terms: {', '.join(plan.exact_terms) or None}")
+    print(f"Needs clarification: {plan.needs_clarification}")
+    print(f"Search query: {plan.search_query}")
+    print(f"Filters: {format_filters(plan.filters)}")
+    print("--- End of query plan ---")
+
+
+def print_retrieved_chunks(chunks: list[RetrievalChunkDebug]) -> None:
     print("\n--- Retrieved chunks ---\n")
-    if not results:
+    if not chunks:
         print("No chunks retrieved.")
-    for rank, (document, score) in enumerate(results, start=1):
-        print_chunk(rank, document, score, preview_limit=PREVIEW_LIMIT)
+    for chunk in chunks:
+        print(f"{chunk.rank}. Score: {chunk.score:.2f}")
+        print(f"   Chunk ID: {chunk.chunk_id}")
+        print(f"   Source: {chunk.source_file}")
+        print(f"   Title: {chunk.title}")
+        if chunk.section:
+            print(f"   Section: {chunk.section}")
+        print(f"   Version: {chunk.version}")
+        print("   Preview:")
+        for line in chunk.preview.splitlines():
+            print(f"     {line}")
+        print()
     print("--- End of retrieved chunks ---")
 
 
-def print_sources(documents: list[Document], used_chunk_ids: list[str]) -> None:
-    sources = select_documents_by_ids(documents, used_chunk_ids)
+def print_selected_chunks(selected_chunk_ids: list[str]) -> None:
+    print("\n--- Selected chunks ---")
+    print(f"Selected chunks: {', '.join(selected_chunk_ids) or None}")
+    print(f"Selected count: {len(selected_chunk_ids)}")
+    print("--- End of selected chunks ---")
 
+
+def print_debug(debug: RagDebug) -> None:
+    print_query_plan(debug.query_plan)
+    if debug.query_plan.needs_clarification:
+        return
+    print_retrieved_chunks(debug.retrieved_chunks)
+    if debug.retrieved_chunks:
+        print_selected_chunks(debug.selected_chunk_ids)
+
+
+def print_sources(sources: list[Source]) -> None:
     print("\nSources:")
     if not sources:
         print("No sources.")
         return
 
-    for rank, document in enumerate(sources, start=1):
-        metadata = document.metadata
-        print(f"{rank}. {metadata.get('source_file')}")
-        print(f"   Title: {metadata.get('title')}")
-        if metadata.get("section"):
-            print(f"   Section: {metadata['section']}")
-        print(f"   Version: {metadata.get('version')}")
-
-
-def print_clarification(query_plan: QueryPlan) -> None:
-    print("\nAnswer:")
-    print(query_plan.clarification_question or FALLBACK_CLARIFICATION)
-
-
-def print_no_answer() -> None:
-    print("\nAnswer:")
-    print(NO_ANSWER_MESSAGE)
-    print("\nSources:")
-    print("No sources.")
+    for rank, source in enumerate(sources, start=1):
+        print(f"{rank}. {source.source_file}")
+        print(f"   Title: {source.title}")
+        if source.section:
+            print(f"   Section: {source.section}")
+        print(f"   Version: {source.version}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,23 +97,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-
-    ensure_collection_ready()
-    ensure_planner_covers_index()
-    store = connect_store()
-
-    # temperature=0: the planner is a classifier, and the same question must always
-    # produce the same plan. With the default temperature it flip-flopped between
-    # asking for clarification and guessing.
-    model = init_chat_model(
-        settings.openai_chat_model,
-        model_provider="openai",
-        api_key=settings.openai_api_key,
-        temperature=0,
-    )
-    planner = model.with_structured_output(QueryPlan)
-    reranker = model.with_structured_output(RerankResult)
-    answerer = model.with_structured_output(RagAnswer)
+    pipeline = RagPipeline()
 
     print("RAG chat started.")
     print("This chat uses the internal knowledge base.")
@@ -161,68 +110,21 @@ def main() -> None:
         if not question:
             continue
 
-        planner_prompt_value = PLANNER_PROMPT.invoke({"question": question})
-        if args.show_prompt:
-            print_prompt(planner_prompt_value, "Query planner prompt")
-
-        query_plan = planner.invoke(planner_prompt_value)
-        filters = build_filters(query_plan)
-        if args.debug:
-            print(format_query_plan(query_plan, filters))
-
-        if query_plan.needs_clarification:
-            print_clarification(query_plan)
-            continue
-
-        results = search_chunks(store, query_plan, filters)
-        if args.debug:
-            print_debug(results)
-
-        if not results:
-            print_no_answer()
-            continue
-
-        if args.no_rerank:
-            documents = [document for document, _ in results[:RERANK_TOP_N]]
-        else:
-            rerank_prompt_value = RERANK_PROMPT.invoke(
-                {
-                    "candidates": format_rerank_candidates(results),
-                    "question": question,
-                    "normalized_question": query_plan.normalized_question,
-                    "exact_terms": ", ".join(query_plan.exact_terms) or "none",
-                }
-            )
-            if args.show_prompt:
-                print_prompt(rerank_prompt_value, "Reranker prompt")
-
-            rerank_result = reranker.invoke(rerank_prompt_value)
-            documents = select_reranked_documents(
-                results, rerank_result.selected_chunk_ids
-            )
-            if args.debug:
-                print_rerank_debug(rerank_result, documents)
-
-            if not documents:
-                print_no_answer()
-                continue
-
-        prompt_value = ANSWER_PROMPT.invoke(
-            {"context": format_context(documents), "question": question}
+        result = pipeline.run(
+            question,
+            use_rerank=not args.no_rerank,
+            include_debug=args.debug,
+            on_prompt=print_prompt if args.show_prompt else None,
         )
-        if args.show_prompt:
-            print_prompt(prompt_value, "Final answer prompt")
 
-        response = answerer.invoke(prompt_value)
+        if result.debug:
+            print_debug(result.debug)
 
         print("\nAnswer:")
-        print(response.answer)
+        print(result.answer)
 
-        if response.has_answer:
-            print_sources(documents, response.used_chunk_ids)
-        else:
-            print("\nSources:")
-            print("No sources.")
+        if not result.needs_clarification:
+            print_sources(result.sources)
 
 
 if __name__ == "__main__":
