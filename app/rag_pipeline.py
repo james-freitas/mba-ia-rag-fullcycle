@@ -20,8 +20,10 @@ from langchain_core.prompt_values import PromptValue
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from app import observability
 from app.config import settings
 from app.query_planner import (
+    SAFE_FILTERS,
     QueryPlan,
     build_filters,
     build_planner_prompt,
@@ -64,6 +66,10 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages(
 
 PromptCallback = Callable[[str, PromptValue], None]
 
+# Which product surface these traces come from. Tenant and product are the ones the
+# application already enforces on every search.
+FEATURE_NAME = "rag_chat"
+
 # One JSON line per pipeline run on stdout: counts, timings and file names only —
 # never prompts, chunks, answers or credentials.
 logger = logging.getLogger("rag.pipeline")
@@ -82,12 +88,17 @@ def _log_run(record: dict) -> None:
 
 
 @contextmanager
-def _timed(timings: "PipelineTimings", field: str):
+def _step(timings: "PipelineTimings", field: str, span_name: str):
+    """Time a pipeline step and record it as a span, duration included."""
     started = time.perf_counter()
-    try:
-        yield
-    finally:
-        setattr(timings, field, _elapsed_ms(started))
+    with observability.span(span_name) as span:
+        try:
+            yield span
+        finally:
+            elapsed = _elapsed_ms(started)
+            setattr(timings, field, elapsed)
+            attribute = observability.duration_attribute(field)
+            observability.set_attributes(span, {attribute: elapsed})
 
 
 class RagAnswer(BaseModel):
@@ -194,6 +205,22 @@ def build_model_usage(usage_metadata: dict) -> list[ModelUsage]:
     ]
 
 
+def build_usage_attributes(usage_metadata: dict) -> dict:
+    # Tokens of a single call: the model that answered plus its counters, or nothing
+    # at all when the provider reported no usage.
+    entries = build_model_usage(usage_metadata)
+    if not entries:
+        return {}
+
+    usage = entries[0]
+    return {
+        observability.RESPONSE_MODEL: usage.model,
+        observability.INPUT_TOKENS: usage.input_tokens,
+        observability.OUTPUT_TOKENS: usage.output_tokens,
+        observability.TOTAL_TOKENS: usage.total_tokens,
+    }
+
+
 def build_sources(documents: list[Document], used_chunk_ids: list[str]) -> list[Source]:
     # Sources come from the application, never from the model: only chunk ids that
     # were really in the context are kept, joined back with their own metadata.
@@ -205,6 +232,7 @@ def build_sources(documents: list[Document], used_chunk_ids: list[str]) -> list[
 
 class RagPipeline:
     def __init__(self) -> None:
+        observability.setup_tracing()
         ensure_collection_ready()
         ensure_planner_covers_index()
         self.store = connect_store()
@@ -236,9 +264,27 @@ class RagPipeline:
         config = {"callbacks": [usage]}
 
         try:
-            with _timed(timings, "total_ms"):
+            with _step(timings, "total_ms", observability.PIPELINE_SPAN) as span:
+                observability.set_attributes(
+                    span,
+                    {
+                        observability.REQUEST_ID: request_id,
+                        observability.FEATURE: FEATURE_NAME,
+                        observability.TENANT: SAFE_FILTERS["tenant"],
+                        observability.PRODUCT: SAFE_FILTERS["product"],
+                        observability.USE_RERANK: use_rerank,
+                    },
+                )
                 result = self._execute(
                     question, use_rerank, request_id, timings, config, on_prompt
+                )
+                observability.set_attributes(
+                    span,
+                    {
+                        observability.HAS_ANSWER: result.has_answer,
+                        observability.NEEDS_CLARIFICATION: result.needs_clarification,
+                        observability.SOURCES_COUNT: len(result.sources),
+                    },
                 )
         except Exception as exc:
             _log_run(
@@ -291,8 +337,22 @@ class RagPipeline:
         if on_prompt:
             on_prompt("Query planner prompt", planner_prompt)
 
-        with _timed(timings, "query_planning_ms"):
+        with _step(
+            timings, "query_planning_ms", observability.QUERY_PLANNING_SPAN
+        ) as span:
             query_plan = self.planner.invoke(planner_prompt, config=config)
+            observability.set_attributes(
+                span,
+                {
+                    observability.NORMALIZED_QUESTION_LENGTH: len(
+                        query_plan.normalized_question
+                    ),
+                    observability.DOC_TYPES: query_plan.doc_types,
+                    observability.PLAN: query_plan.plan,
+                    observability.EXACT_TERMS_COUNT: len(query_plan.exact_terms),
+                    observability.NEEDS_CLARIFICATION: query_plan.needs_clarification,
+                },
+            )
 
         filters = build_filters(query_plan)
         debug = RagDebug(
@@ -310,8 +370,15 @@ class RagPipeline:
                 debug=debug,
             )
 
-        with _timed(timings, "retrieval_ms"):
+        with _step(timings, "retrieval_ms", observability.RETRIEVAL_SPAN) as span:
             results = search_chunks(self.store, query_plan, filters)
+            observability.set_attributes(
+                span,
+                {
+                    observability.RETRIEVED_CHUNKS_COUNT: len(results),
+                    observability.FILTERS: filters,
+                },
+            )
         debug.retrieved_chunks = build_retrieval_debug(results)
 
         if not results:
@@ -322,11 +389,14 @@ class RagPipeline:
             if on_prompt:
                 on_prompt("Reranker prompt", rerank_prompt)
 
-            with _timed(timings, "reranking_ms"):
+            with _step(timings, "reranking_ms", observability.RERANKING_SPAN) as span:
                 rerank_result = self.reranker.invoke(rerank_prompt, config=config)
-            documents = select_reranked_documents(
-                results, rerank_result.selected_chunk_ids
-            )
+                documents = select_reranked_documents(
+                    results, rerank_result.selected_chunk_ids
+                )
+                observability.set_attributes(
+                    span, {observability.SELECTED_CHUNKS_COUNT: len(documents)}
+                )
         else:
             documents = [document for document, _ in results[:RERANK_TOP_N]]
 
@@ -343,8 +413,24 @@ class RagPipeline:
         if on_prompt:
             on_prompt("Final answer prompt", answer_prompt)
 
-        with _timed(timings, "answer_generation_ms"):
-            response = self.answerer.invoke(answer_prompt, config=config)
+        with _step(
+            timings, "answer_generation_ms", observability.ANSWER_GENERATION_SPAN
+        ) as span:
+            # A second handler, scoped to this call: the shared one accumulates the
+            # tokens of every call in the run.
+            answer_usage = UsageMetadataCallbackHandler()
+            response = self.answerer.invoke(
+                answer_prompt,
+                config={**config, "callbacks": [*config["callbacks"], answer_usage]},
+            )
+            observability.set_attributes(
+                span,
+                {
+                    observability.REQUEST_MODEL: settings.openai_chat_model,
+                    **build_usage_attributes(answer_usage.usage_metadata),
+                    observability.HAS_ANSWER: response.has_answer,
+                },
+            )
 
         sources = (
             build_sources(documents, response.used_chunk_ids)
