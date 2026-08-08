@@ -8,12 +8,14 @@ Tracing is configured only when OBSERVABILITY_ENABLED=true. Without that setup
 the OpenTelemetry API hands out non-recording spans, so every call here turns
 into a no-op and the pipeline behaves exactly as before.
 
-Only safe attributes are recorded: ids, counts, flags, filters and timings —
-never the question, the prompts, the chunk contents, the API key or the database
-URL.
+Only safe attributes are recorded: ids, counts, flags, filters and timings. The
+question and the final answer travel apart from them, as debug events, and only
+when development explicitly asks for it. The prompts, the context, the chunk
+contents, the documents, the API key and the database URL never leave.
 """
 
 import json
+import sys
 from base64 import b64encode
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -28,10 +30,11 @@ from opentelemetry.sdk.trace.export import (
     SimpleSpanProcessor,
     SpanProcessor,
 )
+from opentelemetry.sdk.trace.sampling import ParentBased, Sampler, TraceIdRatioBased
 from opentelemetry.trace import Span, Status, StatusCode
 from opentelemetry.util.re import parse_env_headers
 
-from app.config import settings
+from app.config import DEVELOPMENT, settings
 
 TRACER_NAME = "app.rag"
 
@@ -70,6 +73,10 @@ FILTERS = "app.filters"
 SELECTED_CHUNKS_COUNT = "app.selected_chunks_count"
 TOTAL_TOKENS = "app.total_tokens"
 
+# Debug events: the question and the answer, in development only.
+DEBUG_QUESTION_EVENT = "app.debug.question"
+DEBUG_ANSWER_EVENT = "app.debug.answer"
+
 # GenAI semantic conventions: the names the ecosystem already knows how to read.
 REQUEST_MODEL = "gen_ai.request.model"
 RESPONSE_MODEL = "gen_ai.response.model"
@@ -82,21 +89,70 @@ def duration_attribute(field: str) -> str:
     return f"app.{field}"
 
 
+def is_development() -> bool:
+    return settings.app_env == DEVELOPMENT
+
+
+def capture_content_enabled() -> bool:
+    return is_development() and settings.observability_capture_content
+
+
+def validate_observability_policy() -> None:
+    """Refuse to start on a policy that does not hold for the environment.
+
+    A valid APP_ENV and a sample rate within 0.0 and 1.0 are already a contract of
+    Settings, rejected when the environment is read. What is left is the rule that
+    depends on the environment, and it is checked even with tracing disabled: the
+    policy describes the deployment, not whether traces happen to be flowing.
+    """
+    if settings.observability_capture_content and not is_development():
+        print(
+            "Invalid observability policy: OBSERVABILITY_CAPTURE_CONTENT "
+            "can only be true in development.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
+def sample_rate() -> float:
+    # Development always traces everything; the other environments decide.
+    return 1.0 if is_development() else settings.observability_sample_rate
+
+
 _configured = False
 
 
 def setup_tracing() -> None:
     """Configure the global tracer provider. Without it every span is a no-op."""
     global _configured
+    validate_observability_policy()
     if _configured or not settings.observability_enabled:
         return
 
     _configured = True
+    _announce()
     provider = TracerProvider(
-        resource=Resource.create({SERVICE_NAME: settings.otel_service_name})
+        resource=Resource.create({SERVICE_NAME: settings.otel_service_name}),
+        sampler=_build_sampler(),
     )
     provider.add_span_processor(_build_processor())
     trace.set_tracer_provider(provider)
+
+
+def _build_sampler() -> Sampler:
+    # ParentBased: a step follows the decision taken for the pipeline it belongs to,
+    # so a sampled trace is never half recorded.
+    return ParentBased(TraceIdRatioBased(sample_rate()))
+
+
+def _announce() -> None:
+    print(
+        "Observability enabled.\n"
+        f"Environment: {settings.app_env}\n"
+        f"Exporter: {settings.otel_traces_exporter}\n"
+        f"Sample rate: {sample_rate()}\n"
+        f"Capture content: {str(settings.observability_capture_content).lower()}"
+    )
 
 
 def get_tracer() -> trace.Tracer:
@@ -130,6 +186,25 @@ def set_attributes(span: Span, attributes: dict[str, Any]) -> None:
             if value is not None
         }
     )
+
+
+def record_debug_content(
+    span: Span, question: str | None = None, answer: str | None = None
+) -> None:
+    """The question and the answer, as debug events, when development asks for them.
+
+    Events and not attributes: attributes describe the operation and travel in every
+    environment, so raw content has no place among them. Prompts, context, chunks and
+    documents are never recorded here either.
+    """
+    if not capture_content_enabled() or not span.is_recording():
+        return
+
+    if question:
+        span.add_event(DEBUG_QUESTION_EVENT, {DEBUG_QUESTION_EVENT: question})
+
+    if answer:
+        span.add_event(DEBUG_ANSWER_EVENT, {DEBUG_ANSWER_EVENT: answer})
 
 
 def _attribute_value(value: Any) -> Any:

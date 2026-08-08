@@ -325,6 +325,99 @@ Sem `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY`, o exporter usa direto
 qualquer backend OTLP (ou para um OpenTelemetry Collector no meio). E se você já tiver
 definido um header à mão, ele **não** é sobrescrito pelo que o helper geraria.
 
+### Environment-based telemetry
+
+O que é aceitável observar muda conforme onde a aplicação roda. `APP_ENV` (`development`,
+`staging` ou `production`) governa duas decisões: **quanto** se coleta e **o que** se
+permite coletar.
+
+| | development | staging | production |
+| --- | --- | --- | --- |
+| Exporter típico | `console` | `otlp` | `otlp` |
+| Sample rate | sempre 1.0 | `OBSERVABILITY_SAMPLE_RATE` | `OBSERVABILITY_SAMPLE_RATE` |
+| `OBSERVABILITY_CAPTURE_CONTENT` | pode ser `true` | **precisa ser false** | **precisa ser false** |
+
+```bash
+# Development: ver tudo, no terminal — com pergunta e resposta
+APP_ENV=development
+OBSERVABILITY_ENABLED=true
+OBSERVABILITY_CAPTURE_CONTENT=true
+OTEL_TRACES_EXPORTER=console
+OBSERVABILITY_SAMPLE_RATE=1.0
+
+# Staging: destino real, metade dos traces
+APP_ENV=staging
+OBSERVABILITY_ENABLED=true
+OTEL_TRACES_EXPORTER=otlp
+OBSERVABILITY_SAMPLE_RATE=0.5
+
+# Production: amostragem com critério, conteúdo bruto proibido
+APP_ENV=production
+OBSERVABILITY_ENABLED=true
+OTEL_TRACES_EXPORTER=otlp
+OBSERVABILITY_SAMPLE_RATE=0.1
+OBSERVABILITY_CAPTURE_CONTENT=false
+```
+
+Em development o sample rate é **sempre 1.0**, mesmo que a variável diga outra coisa:
+localmente você quer ver todas as execuções. Nos outros ambientes vale o que estiver em
+`OBSERVABILITY_SAMPLE_RATE`, aplicado por um sampler `ParentBased(TraceIdRatioBased)` —
+`ParentBased` porque a decisão precisa valer para o trace inteiro: ou o pipeline é
+gravado com suas quatro etapas, ou não é gravado. Um trace pela metade seria pior que
+nenhum.
+
+A política é conferida na subida por `validate_observability_policy()`, e a aplicação
+**recusa iniciar** com mensagem clara se `APP_ENV` for inválido, se o sample rate estiver
+fora de 0.0–1.0 ou se `OBSERVABILITY_CAPTURE_CONTENT=true` fora de development:
+
+```
+Invalid observability policy: OBSERVABILITY_CAPTURE_CONTENT can only be true in development.
+```
+
+Ligada, a aplicação imprime a configuração — e só o que é seguro imprimir:
+
+```
+Observability enabled.
+Environment: development
+Exporter: otlp
+Sample rate: 1.0
+Capture content: false
+```
+
+Em **production nada disso reduz a telemetria operacional**: continuam indo `request_id`,
+tenant, product, feature, contagens, filtros, flags, tempos por etapa, modelo e tokens —
+os mesmos atributos de sempre. O que muda entre os ambientes é o volume (sampling) e a
+permissão para conteúdo.
+
+#### Conteúdo: pergunta e resposta, só em development
+
+Com `APP_ENV=development` **e** `OBSERVABILITY_CAPTURE_CONTENT=true`, o span raiz passa a
+carregar a pergunta e a resposta final como **eventos**:
+
+```
+"events": [
+  { "name": "app.debug.question", "attributes": { "app.debug.question": "Qual é o SLA para incidentes P1 no plano Enterprise?" } },
+  { "name": "app.debug.answer",   "attributes": { "app.debug.answer": "O SLA para incidentes P1 no plano Enterprise é..." } }
+]
+```
+
+Eventos e não atributos, de propósito: atributo descreve a operação e viaja em todo
+ambiente — é por onde se filtra e se agrega. Conteúdo bruto é outra natureza de dado,
+fica separado, é opcional e morre em development. Resposta de esclarecimento e recusa
+também entram como `answer`.
+
+Em staging ou production, `OBSERVABILITY_CAPTURE_CONTENT=true` **não roda**: a aplicação
+recusa iniciar. Não é uma flag que "não faz nada lá" — é uma porta que só abre em
+development.
+
+E o que **nunca** sai, em ambiente nenhum, nem com a captura ligada: os prompts (planner,
+reranker, resposta final), o contexto montado, o conteúdo dos chunks, os documentos, a
+`OPENAI_API_KEY`, a `DATABASE_URL` e os valores dos headers OTLP.
+
+E o `--show-prompt`: é recurso **local de terminal**, para o desenvolvedor ler o prompt na
+própria tela. Ele não existe na API, não vai para span nenhum e não serve como
+observabilidade de produção.
+
 ## Ferramentas de inspeção e comparação
 
 - `python -m app.retrieve "sua pergunta"` — só a busca vetorial, sem chamar o modelo de

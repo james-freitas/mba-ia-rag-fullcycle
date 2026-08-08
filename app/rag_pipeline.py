@@ -275,6 +275,7 @@ class RagPipeline:
                         observability.USE_RERANK: use_rerank,
                     },
                 )
+                observability.record_debug_content(span, question=question)
                 result = self._execute(
                     question, use_rerank, request_id, timings, config, on_prompt
                 )
@@ -286,6 +287,8 @@ class RagPipeline:
                         observability.SOURCES_COUNT: len(result.sources),
                     },
                 )
+                # Also when it is a clarification question or a refusal.
+                observability.record_debug_content(span, answer=result.answer)
         except Exception as exc:
             _log_run(
                 {
