@@ -71,7 +71,8 @@ não tem certeza — sem filtro de tipo é melhor do que com o filtro errado.
 
 ```bash
 cp .env.example .env          # preencha OPENAI_API_KEY
-docker compose up -d          # Postgres com pgvector
+docker compose up -d          # Postgres com pgvector (o Langfuse fica no profile
+                              # observability, veja "Langfuse via OTLP")
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -195,8 +196,30 @@ Para mandar os traces para uma ferramenta, troque o exporter e aponte o endpoint
 ```bash
 OTEL_TRACES_EXPORTER=otlp
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic%20...
+OTEL_EXPORTER_OTLP_HEADERS=x-api-key=...
 ```
+
+### O backend mais leve possível: Jaeger
+
+Antes de subir o Langfuse inteiro, vale ver os spans num backend de **um container só**
+(117 MB). O compose tem o Jaeger no profile `jaeger`:
+
+```bash
+docker compose --profile jaeger up -d       # UI em http://localhost:16686
+```
+
+No `.env`, aponte para ele e deixe as chaves do Langfuse vazias:
+
+```bash
+OTEL_TRACES_EXPORTER=otlp
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+```
+
+Faça uma pergunta e abra <http://localhost:16686>, serviço `fcai-rag-api`: lá está o mesmo
+trace, com os cinco spans, as durações e os atributos `app.*`. **Nenhuma linha de código
+mudou** — só o endereço. É a demonstração mais direta de que a aplicação não conhece o
+backend. O que o Jaeger não faz é entender `gen_ai.*` como uma geração com modelo, tokens
+e custo; para isso, o Langfuse.
 
 Cada execução abre um span raiz `ai.rag.pipeline` e, dentro dele, um span por etapa:
 
@@ -221,6 +244,86 @@ dos atributos em constantes: o pipeline só chama `observability.span(...)` e
 `observability.set_attributes(...)`. Com `OBSERVABILITY_ENABLED=false` nenhum tracer
 provider é configurado, e a própria API do OpenTelemetry devolve spans que não gravam
 nada — o pipeline roda igual, no terminal e na API.
+
+### Langfuse via OTLP
+
+O console serve para desenvolver; para **ver** os traces, eles vão para o Langfuse pelo
+protocolo OTLP. A aplicação continua falando só OpenTelemetry: não existe SDK do Langfuse
+no projeto (`grep -rn "langfuse" app/` só encontra a montagem do endpoint e do header). O
+Langfuse aqui é o backend de visualização, e trocá-lo por Phoenix, Datadog, New Relic,
+AWS, Google ou Azure é trocar variável de ambiente — o pipeline não muda.
+
+O `docker-compose.yml` já traz um Langfuse completo, atrás do profile `observability` —
+quem só quer o chat não baixa nada disso:
+
+```bash
+docker compose --profile observability up -d   # sobe o pgvector e o Langfuse
+```
+
+São **seis containers**, e isso não é escolha deste projeto: é a arquitetura do Langfuse
+v3/v4. A ingestão é `evento → S3 → fila → worker → ClickHouse`, então cada peça é
+obrigatória — Postgres (usuários, projetos, chaves), ClickHouse (os traces), Redis (a
+fila), MinIO (os blobs dos eventos), mais `web` e `worker`. É o preço de um backend que
+guarda milhões de traces e calcula custo por modelo; para só *ver* os spans, o Jaeger
+acima resolve com um container.
+
+Na primeira subida ele cria organização, projeto, usuário e **as chaves de API** (é o que
+fazem as variáveis `LANGFUSE_INIT_*` no compose). Abra <http://localhost:3000> e entre com
+`admin@fcai.local` / `langfuse123`. Tudo ali é credencial de desenvolvimento local — em
+produção, todas mudam (e o `ENCRYPTION_KEY` sai de `openssl rand -hex 32`).
+
+No `.env` da aplicação:
+
+```bash
+OBSERVABILITY_ENABLED=true
+OTEL_TRACES_EXPORTER=otlp
+
+LANGFUSE_PUBLIC_KEY=pk-lf-fcai-rag-local
+LANGFUSE_SECRET_KEY=sk-lf-fcai-rag-local
+LANGFUSE_HOST=http://localhost:3000
+```
+
+Para o Langfuse Cloud em vez do local, pegue as chaves em **Settings → API Keys** do seu
+projeto e troque o `LANGFUSE_HOST` por `https://cloud.langfuse.com`.
+
+Com as duas chaves preenchidas, `app/observability.py` monta sozinho o que o Langfuse
+espera, sem nada hardcoded no código:
+
+| | |
+| --- | --- |
+| Endpoint | `LANGFUSE_HOST` + `/api/public/otel` (o exporter acrescenta `/v1/traces`) |
+| `Authorization` | `Basic base64(public_key:secret_key)` |
+| `x-langfuse-ingestion-version` | `4` |
+
+Suba a API e faça uma pergunta:
+
+```bash
+uvicorn app.api:app --reload
+
+curl -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Qual é o SLA para incidentes P1 no plano Enterprise?"}'
+```
+
+No Langfuse, abra **Tracing → Traces**: cada requisição é um trace `ai.rag.pipeline` com
+os spans das etapas dentro (query planning, retrieval, reranking, answer generation),
+cada um com seus tempos e atributos. Filtre por `app.request_id` para chegar em uma
+execução específica — é o mesmo id que aparece no log JSON e no `--debug`.
+
+Repare em um detalhe: o `ai.rag.answer_generation` chega classificado como **generation**,
+com o modelo e os tokens preenchidos, enquanto os outros são spans comuns. Ninguém disse
+isso ao Langfuse — ele reconheceu os atributos `gen_ai.*` das semantic conventions. É o
+que se ganha usando o vocabulário do padrão em vez de nomes próprios.
+
+O que **não** vai junto: pergunta, prompts, contexto montado, conteúdo dos chunks,
+documentos, `OPENAI_API_KEY` e `DATABASE_URL`. Os spans levam contagens, ids, flags,
+filtros, tempos e tokens. Na subida, a aplicação imprime para onde os traces vão e os
+**nomes** dos headers — nunca os valores, que carregam a credencial.
+
+Sem `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY`, o exporter usa direto
+`OTEL_EXPORTER_OTLP_ENDPOINT` e `OTEL_EXPORTER_OTLP_HEADERS`, que é o caminho padrão para
+qualquer backend OTLP (ou para um OpenTelemetry Collector no meio). E se você já tiver
+definido um header à mão, ele **não** é sobrescrito pelo que o helper geraria.
 
 ## Ferramentas de inspeção e comparação
 

@@ -14,7 +14,7 @@ URL.
 """
 
 import json
-import os
+from base64 import b64encode
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -29,12 +29,21 @@ from opentelemetry.sdk.trace.export import (
     SpanProcessor,
 )
 from opentelemetry.trace import Span, Status, StatusCode
+from opentelemetry.util.re import parse_env_headers
 
 from app.config import settings
 
 TRACER_NAME = "app.rag"
 
 OTLP_EXPORTER = "otlp"
+
+# Where Langfuse receives OpenTelemetry traces, and the ingestion it should use.
+LANGFUSE_OTEL_PATH = "/api/public/otel"
+LANGFUSE_INGESTION_HEADER = "x-langfuse-ingestion-version"
+LANGFUSE_INGESTION_VERSION = "4"
+
+# OTLP endpoints are a base URL; each signal lives under its own path.
+TRACES_PATH = "/v1/traces"
 
 # Span names: one per pipeline step.
 PIPELINE_SPAN = "ai.rag.pipeline"
@@ -131,21 +140,50 @@ def _attribute_value(value: Any) -> Any:
 
 def _build_processor() -> SpanProcessor:
     if settings.otel_traces_exporter == OTLP_EXPORTER:
-        _export_otlp_settings()
         # Batched: the spans leave in one request, off the answer's critical path.
-        return BatchSpanProcessor(OTLPSpanExporter())
+        return BatchSpanProcessor(_build_otlp_exporter())
 
     # Console: each span is printed as it ends, while you use the chat.
     return SimpleSpanProcessor(ConsoleSpanExporter())
 
 
-def _export_otlp_settings() -> None:
-    # The exporter reads the standard OTEL_* variables from the process
-    # environment, and these live in the .env file — so they are bridged here.
-    # A variable already set in the real environment wins.
-    for name, value in (
-        ("OTEL_EXPORTER_OTLP_ENDPOINT", settings.otel_exporter_otlp_endpoint),
-        ("OTEL_EXPORTER_OTLP_HEADERS", settings.otel_exporter_otlp_headers),
-    ):
-        if value:
-            os.environ.setdefault(name, value)
+def _build_otlp_exporter() -> OTLPSpanExporter:
+    endpoint = settings.otel_exporter_otlp_endpoint
+    headers = _configured_headers()
+
+    # Langfuse is just an OTLP endpoint: with its keys filled in they decide the
+    # destination, and nothing here imports a Langfuse SDK. Without them the generic
+    # OTEL_EXPORTER_OTLP_* values are used as they are, for any OTLP backend.
+    if settings.langfuse_public_key and settings.langfuse_secret_key:
+        endpoint = settings.langfuse_host.rstrip("/") + LANGFUSE_OTEL_PATH
+        headers.setdefault("authorization", f"Basic {_langfuse_credential()}")
+        headers.setdefault(LANGFUSE_INGESTION_HEADER, LANGFUSE_INGESTION_VERSION)
+
+    # Header names only: their values carry the credentials.
+    names = ", ".join(sorted(headers)) or "none"
+    print(f"Traces to {endpoint or 'the OTLP default endpoint'} (headers: {names}).")
+
+    return OTLPSpanExporter(endpoint=_traces_url(endpoint), headers=headers or None)
+
+
+def _configured_headers() -> dict[str, str]:
+    if not settings.otel_exporter_otlp_headers:
+        return {}
+
+    # liberal: the standard asks for URL-encoded values, but an Authorization
+    # header pasted by hand ("Basic abc...") has a space and would be dropped.
+    return dict(parse_env_headers(settings.otel_exporter_otlp_headers, liberal=True))
+
+
+def _langfuse_credential() -> str:
+    keys = f"{settings.langfuse_public_key}:{settings.langfuse_secret_key}"
+    return b64encode(keys.encode()).decode()
+
+
+def _traces_url(endpoint: str) -> str | None:
+    # Without an endpoint the exporter falls back to its own OTEL_* defaults.
+    if not endpoint:
+        return None
+
+    endpoint = endpoint.rstrip("/")
+    return endpoint if endpoint.endswith(TRACES_PATH) else endpoint + TRACES_PATH

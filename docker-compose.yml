@@ -16,5 +16,156 @@ services:
       timeout: 5s
       retries: 5
 
+  # Jaeger: o backend OTLP mais leve possível, um container só. Os mesmos spans do
+  # pipeline, sem trocar uma linha de código — só o endpoint.
+  jaeger:
+    profiles: ["jaeger"]
+    image: docker.io/jaegertracing/all-in-one:latest
+    container_name: fc-jaeger
+    restart: unless-stopped
+    # A UI 1.76 segue o dark mode do sistema, mas só mostra o botão de trocar o tema
+    # quando themes.enabled está ligado na config.
+    command: ["--query.ui-config=/etc/jaeger/ui-config.json"]
+    volumes:
+      - ./jaeger-ui-config.json:/etc/jaeger/ui-config.json:ro
+    ports:
+      - "16686:16686"   # UI
+      - "4318:4318"     # OTLP HTTP
+
+  # Langfuse: o backend que recebe os traces OTLP da aplicação. As credenciais abaixo
+  # são de desenvolvimento local — em produção, todas mudam.
+  langfuse-web:
+    profiles: ["observability"]
+    image: docker.io/langfuse/langfuse:4
+    container_name: fc-langfuse-web
+    restart: unless-stopped
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      <<: &langfuse-env
+        DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/postgres
+        SALT: fcai-local-salt
+        # 256 bits em hex, entre aspas para o YAML não ler como número:
+        # openssl rand -hex 32
+        ENCRYPTION_KEY: "6dbfdd97e0abd8a452de634fea5dc339cd31468bf2bd041c4fb3e9f93ae14b94"
+        TELEMETRY_ENABLED: "false"
+        CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+        CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+        CLICKHOUSE_USER: clickhouse
+        CLICKHOUSE_PASSWORD: clickhouse
+        CLICKHOUSE_CLUSTER_ENABLED: "false"
+        REDIS_HOST: langfuse-redis
+        REDIS_PORT: "6379"
+        REDIS_AUTH: langfuse-local-redis
+        LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+        LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+        LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+        LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+        LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+        LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+        LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: fcai-local-secret
+      # Cria organização, projeto, usuário e as chaves de API na primeira subida:
+      # é daqui que saem LANGFUSE_PUBLIC_KEY e LANGFUSE_SECRET_KEY do .env.
+      LANGFUSE_INIT_ORG_ID: fcai
+      LANGFUSE_INIT_ORG_NAME: FCAI
+      LANGFUSE_INIT_PROJECT_ID: fcai-rag
+      LANGFUSE_INIT_PROJECT_NAME: FCAI RAG
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-fcai-rag-local
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-fcai-rag-local
+      LANGFUSE_INIT_USER_EMAIL: admin@fcai.local
+      LANGFUSE_INIT_USER_NAME: FCAI Admin
+      LANGFUSE_INIT_USER_PASSWORD: langfuse123
+
+  langfuse-worker:
+    profiles: ["observability"]
+    image: docker.io/langfuse/langfuse-worker:4
+    container_name: fc-langfuse-worker
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    environment:
+      <<: *langfuse-env
+
+  langfuse-postgres:
+    profiles: ["observability"]
+    image: docker.io/postgres:17
+    container_name: fc-langfuse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-clickhouse:
+    profiles: ["observability"]
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    container_name: fc-langfuse-clickhouse
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-redis:
+    profiles: ["observability"]
+    image: docker.io/redis:7
+    container_name: fc-langfuse-redis
+    restart: unless-stopped
+    command: --requirepass langfuse-local-redis --maxmemory-policy noeviction
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-minio:
+    profiles: ["observability"]
+    image: docker.io/minio/minio
+    container_name: fc-langfuse-minio
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   postgres_data:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_redis_data:
+  langfuse_minio_data:
