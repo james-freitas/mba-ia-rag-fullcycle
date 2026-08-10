@@ -491,6 +491,183 @@ AI_MONTHLY_BUDGET_USD=0 python -m app.rag_chat          # budget esgotado: bloqu
 cat data/ai_usage.jsonl                                 # o histórico
 ```
 
+## Evaluation dataset
+
+Observabilidade mostra o que aconteceu e governança decide o que ainda pode acontecer.
+Nenhuma das duas responde à pergunta que mais importa: **a resposta estava certa?**
+
+Para responder isso é preciso ter contra o que comparar. Esta etapa cria essa
+referência — um conjunto de casos representativos, versionado junto com o código, em
+`evals/fcai_knowledge_chat.jsonl`. Uma linha por caso:
+
+```json
+{"id": "sla_p1_enterprise",
+ "question": "Qual é o tempo de resposta para incidentes P1 no plano Enterprise?",
+ "should_answer": true, "should_clarify": false,
+ "accepted_source_files": ["product-support-sla.md", "enterprise-plan.md"],
+ "required_terms": ["1 hora", "24x7"],
+ "expected_doc_types": ["sla", "plan"], "expected_plan": "enterprise",
+ "tags": ["rag", "sla", "enterprise", "p1"]}
+```
+
+| Campo | O que expressa |
+| --- | --- |
+| `should_answer` | A base sustenta uma resposta |
+| `should_clarify` | A pergunta é ambígua: o certo é perguntar de volta, não adivinhar |
+| `accepted_source_files` | Os documentos que podem sustentar a resposta |
+| `required_terms` | O que precisa aparecer na resposta para ela ser correta |
+| `expected_doc_types`, `expected_plan` | O filtro que o planner deveria ter escolhido |
+| `tags` | Recortes para fatiar o resultado depois (por tema, por plano) |
+
+É `accepted_source_files`, e não `expected_source_files`, por um motivo: o tempo de
+resposta do P1 Enterprise está tanto no documento de SLA quanto no do plano. Citar
+qualquer um dos dois é estar certo, e um campo que exigisse um único arquivo
+transformaria uma resposta correta em falha.
+
+Os termos são literais e verbatim da base — `1 hora`, `R$ 499`, `80%`, `próximo ciclo`,
+`suporte@fcai.example.com` — justamente para não punir variação de estilo. O que se
+cobra é o fato, não a redação.
+
+### Três tipos de caso
+
+Um dataset só de perguntas fáceis mede a coisa errada: ele premia um sistema que
+responde sempre, inclusive quando deveria se recusar. Por isso os 37 casos se dividem
+em três comportamentos esperados:
+
+| Tipo | Casos | O que verifica |
+| --- | --- | --- |
+| Respondível | 29 | Achou o documento certo e disse o fato certo |
+| Recusa | 4 | Reconheceu o que **não** está na base, em vez de inventar |
+| Clarificação | 4 | Percebeu a ambiguidade e perguntou de volta |
+
+Os casos de recusa cobrem o que a base não tem: contrato de um cliente específico, um
+recurso que não existe no produto, dado operacional de uso real e número de
+funcionários. Os de clarificação são perguntas cuja resposta muda conforme o plano —
+"quanto eu pago no meu plano?" não tem uma resposta só.
+
+Repare no que **não** virou recusa: "qual é o preço do plano Enterprise?". A base
+responde — `sob consulta` — e essa é a resposta certa. "Não existe preço fixo" é
+fundamentado; "não encontrei informação" seria falso. Marcar esse caso como recusa
+cobraria do sistema exatamente o comportamento errado, e é o tipo de engano que só
+aparece quando se escreve a expectativa antes de medir.
+
+### Sincronizando com o Langfuse
+
+O arquivo é a fonte da verdade; o Langfuse é onde ele vira dataset, e depois experiments
+e scores. A sincronização valida antes de enviar:
+
+```bash
+python -m app.eval_dataset --validate-only   # só valida o JSONL, não chama o Langfuse
+python -m app.eval_dataset                   # valida e sincroniza
+```
+
+```
+Loading evaluation cases...
+Loaded cases: 37
+Validating dataset...
+Dataset: fcai-knowledge-chat-v1
+Synced items: 37
+Dataset sync completed.
+```
+
+A validação é do próprio dataset, não do RAG: `id` único e não vazio, pergunta não
+vazia, `should_answer` e `should_clarify` nunca verdadeiros ao mesmo tempo, caso de
+clarificação sem arquivos de origem, caso respondível com origem e termos, `tags`
+preenchidas. Os `expected_doc_types` e o `expected_plan` são validados contra os mesmos
+`Literal`s que o planner usa (`app/query_planner.py`) — uma expectativa que o filtro não
+consegue expressar seria impossível de medir. E cada `accepted_source_files` precisa
+existir de fato em `knowledge_base/`: um nome de arquivo errado reprovaria o caso pelo
+motivo errado, meses depois.
+
+O `id` do caso é o id do item no Langfuse, então sincronizar de novo **atualiza** os
+itens em vez de criar cópias. O dataset se chama `fcai-knowledge-chat-v1` — o sufixo é
+proposital: mudar as expectativas depois de medir invalida a comparação, então um
+critério novo vira uma `v2`, e não uma edição silenciosa da `v1`.
+
+Requer `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY` no `.env`, as mesmas chaves já
+usadas pelo Langfuse na etapa de observabilidade. Sem elas, o comando avisa e para —
+`--validate-only` continua funcionando offline.
+
+### O que esta etapa ainda não é
+
+Nada aqui executa o pipeline de RAG. Nenhuma pergunta foi respondida, nenhum modelo foi
+chamado, nenhum experiment foi criado e nenhum score existe ainda. O objetivo é só ter
+a base de casos — porque medir sem um critério escrito antes vira justificar o resultado
+depois.
+
+## Contract tests
+
+O dataset diz o que se espera de cada pergunta. Os testes de contrato verificam algo
+anterior a isso: se a API cumpre a **forma** que promete, independente do que o modelo
+decida responder.
+
+Eles não chamam LLM, não chamam OpenAI, não abrem o Postgres e não fazem retrieval. No
+lugar do pipeline entra um `FakeRagPipeline`, injetado em `app.state.pipeline`, que
+devolve sob demanda as três formas possíveis de resposta — resposta com fontes, recusa e
+pergunta de volta. Assim cada cenário é exercitado de propósito, em vez de esperado.
+
+```bash
+python -m pytest        # roda tudo, em menos de 1 segundo
+```
+
+Sem flag, sem variável de ambiente, sem custo. É a suíte que roda em cada commit.
+
+### O que é verificado
+
+| Cenário | Contrato |
+| --- | --- |
+| `GET /health` | 200 e `{"status": "ok"}` |
+| Resposta | `has_answer=true`, `needs_clarification=false`, ao menos uma source com `source_file` e `title` |
+| Recusa | `has_answer=false`, `needs_clarification=false`, `sources` vazio |
+| Clarificação | `needs_clarification=true`, `has_answer=false`, `sources` vazio |
+| `debug=false` | a chave `debug` **não** aparece na resposta |
+| `debug=true` | `debug` com `request_id`, `query_plan` e `timings` |
+| Pergunta vazia ou só espaços | `400`, e o pipeline nunca é chamado |
+| Flags | `use_rerank` e `debug` chegam ao `pipeline.run(...)` como foram pedidos |
+
+Em todos, o contrato base: `200`, `answer` string não vazia, `has_answer` e
+`needs_clarification` booleanos, `sources` lista.
+
+### O ponto de injeção
+
+`app/api.py` construía o `RagPipeline` no import, o que obrigava qualquer `TestClient` a
+abrir banco antes do primeiro teste. Agora existe um `get_pipeline()` que constrói na
+primeira chamada:
+
+```python
+def get_pipeline() -> RagPipeline:
+    if not hasattr(app.state, "pipeline"):
+        app.state.pipeline = RagPipeline()
+    return app.state.pipeline
+```
+
+Os testes põem o fake em `app.state.pipeline` antes de subir o cliente, e o real nunca
+chega a existir. Em produção nada muda, exceto que o pipeline nasce na primeira
+requisição em vez de na subida do processo.
+
+O `FakeRagPipeline` usa os modelos Pydantic de verdade (`RagPipelineResult`, `Source`,
+`RagDebug`, `QueryPlanDebug`, `PipelineTimings`) — se um campo do contrato mudar, o teste
+quebra na hora, que é o objetivo. E ele honra o `include_debug` como o pipeline real: o
+bloco de debug só existe quando foi pedido.
+
+### O que eles não fazem
+
+Nada aqui julga conteúdo. Nenhum teste pergunta se a resposta cita `1 hora`, se veio do
+documento certo, ou se aquela pergunta específica *deveria* ter pedido esclarecimento.
+Isso é qualidade do modelo, não contrato da API — e é medido por evaluation, com o
+dataset e os experiments, nas próximas etapas. Sem judge, sem Ragas, sem métrica de RAG.
+
+## Dataset validation
+
+O dataset é validado por conta própria, em `tests/test_eval_dataset_validation.py`. Ele
+roda o mesmo `validate_dataset` do `app/eval_dataset.py` e confere que os três
+comportamentos continuam cobertos: respondível, recusa e clarificação.
+
+Essa validação **não chama o Knowledge Chat**: não sobe API, não instancia pipeline, não
+chama modelo e não sincroniza nada com o Langfuse. Ela só garante que o dataset está
+consistente para as aulas de evaluation que vêm a seguir — um caso quebrado apareceria lá
+como experiment falhando, com a culpa caindo no pipeline; aqui aparece como teste vermelho.
+
 ## Ferramentas de inspeção e comparação
 
 - `python -m app.retrieve "sua pergunta"` — só a busca vetorial, sem chamar o modelo de
@@ -530,12 +707,16 @@ app/
   rag_pipeline.py  # o pipeline completo, compartilhado pelo terminal e pela API
   observability.py # os spans de OpenTelemetry, isolados em um só lugar
   governance.py    # política de modelo e budget, e o ledger de uso estimado
+  eval_dataset.py  # valida o dataset de evaluation e sincroniza com o Langfuse
   rag_chat.py      # o chat no terminal
   api.py           # a API HTTP (FastAPI)
   retrieve.py      # busca isolada, sem modelo de chat
   chat.py          # chat sem RAG (comparação)
   context_chat.py  # chat com um documento inteiro no prompt (comparação)
 knowledge_base/    # os documentos Markdown com front matter
+evals/             # o dataset de evaluation em JSONL, versionado com o código
+tests/             # contrato da API (com fake) e validação do dataset
+pytest.ini         # testpaths e pythonpath dos testes
 test.http          # requests prontos para a extensão REST Client
 docker-compose.yml
 requirements.txt

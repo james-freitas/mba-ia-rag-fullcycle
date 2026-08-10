@@ -10,7 +10,14 @@ from pydantic import BaseModel
 from app.rag_pipeline import RagPipeline, RagPipelineResult
 
 app = FastAPI(title="FCAI Knowledge Chat API")
-pipeline = RagPipeline()
+
+
+def get_pipeline() -> RagPipeline:
+    # Built on first use, never at import: this is what lets the contract tests put a
+    # fake in app.state and exercise the API without a database or an OpenAI key.
+    if not hasattr(app.state, "pipeline"):
+        app.state.pipeline = RagPipeline()
+    return app.state.pipeline
 
 
 class ChatRequest(BaseModel):
@@ -31,7 +38,7 @@ def chat(request: ChatRequest) -> RagPipelineResult:
         raise HTTPException(status_code=400, detail="question must not be empty")
 
     try:
-        return pipeline.run(
+        return get_pipeline().run(
             question,
             use_rerank=request.use_rerank,
             include_debug=request.debug,
