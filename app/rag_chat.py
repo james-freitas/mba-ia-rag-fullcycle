@@ -8,6 +8,7 @@ import argparse
 
 from langchain_core.prompt_values import PromptValue
 
+from app.governance import PolicyDecision
 from app.rag_pipeline import (
     QueryPlanDebug,
     RagDebug,
@@ -88,12 +89,25 @@ def print_pipeline_debug(debug: RagDebug) -> None:
     print("--- End of pipeline debug ---")
 
 
+def print_policy(policy: PolicyDecision) -> None:
+    print("\n--- Policy ---")
+    print(f"Allowed: {policy.allowed}")
+    print(f"Reason: {policy.reason}")
+    print(f"Model: {policy.model}")
+    print(f"Monthly budget: USD {policy.monthly_budget_usd}")
+    print(f"Current month spend: USD {policy.current_month_spend_usd}")
+    print("--- End of policy ---")
+
+
 def print_debug(debug: RagDebug) -> None:
-    print_query_plan(debug.query_plan)
-    if not debug.query_plan.needs_clarification:
-        print_retrieved_chunks(debug.retrieved_chunks)
-        if debug.retrieved_chunks:
-            print_selected_chunks(debug.selected_chunk_ids)
+    if debug.policy:
+        print_policy(debug.policy)
+    if debug.query_plan:
+        print_query_plan(debug.query_plan)
+        if not debug.query_plan.needs_clarification:
+            print_retrieved_chunks(debug.retrieved_chunks)
+            if debug.retrieved_chunks:
+                print_selected_chunks(debug.selected_chunk_ids)
     print_pipeline_debug(debug)
 
 

@@ -4,7 +4,8 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE = PROJECT_ROOT / ".env"
 
 Environment = Literal["development", "staging", "production"]
 DEVELOPMENT: Environment = "development"
@@ -34,6 +35,13 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = Field("", alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     otel_exporter_otlp_headers: str = Field("", alias="OTEL_EXPORTER_OTLP_HEADERS")
 
+    ai_allowed_models: str = Field("gpt-4.1-mini", alias="AI_ALLOWED_MODELS")
+    ai_monthly_budget_usd: float = Field(10.0, alias="AI_MONTHLY_BUDGET_USD", ge=0.0)
+    ai_max_output_tokens: int = Field(1200, alias="AI_MAX_OUTPUT_TOKENS", gt=0)
+    ai_usage_ledger_path: Path = Field(
+        Path("data/ai_usage.jsonl"), alias="AI_USAGE_LEDGER_PATH"
+    )
+
     langfuse_public_key: str = Field("", alias="LANGFUSE_PUBLIC_KEY")
     langfuse_secret_key: str = Field("", alias="LANGFUSE_SECRET_KEY")
     langfuse_host: str = Field("http://localhost:3000", alias="LANGFUSE_HOST")
@@ -41,6 +49,17 @@ class Settings(BaseSettings):
     @property
     def psycopg_dsn(self) -> str:
         return self.database_url.replace("postgresql+psycopg://", "postgresql://")
+
+    @property
+    def allowed_models(self) -> list[str]:
+        # Comma separated, not JSON: AI_ALLOWED_MODELS=gpt-4.1-mini,gpt-4.1
+        return [name.strip() for name in self.ai_allowed_models.split(",") if name.strip()]
+
+    @property
+    def usage_ledger_path(self) -> Path:
+        # Anchored to the project, like every other file under data/.
+        path = self.ai_usage_ledger_path
+        return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 settings = Settings()

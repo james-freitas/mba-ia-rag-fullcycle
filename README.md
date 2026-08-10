@@ -418,6 +418,79 @@ E o `--show-prompt`: é recurso **local de terminal**, para o desenvolvedor ler 
 própria tela. Ele não existe na API, não vai para span nenhum e não serve como
 observabilidade de produção.
 
+## Operational governance
+
+Observabilidade mostra **o que aconteceu**. Governança decide **o que ainda pode
+acontecer**. É a diferença entre um painel e um freio.
+
+Antes de qualquer coisa — antes do query planner, do retrieval e de qualquer embedding —
+o pipeline carrega uma política e decide se a execução pode seguir:
+
+```bash
+AI_ALLOWED_MODELS=gpt-4.1-mini              # lista separada por vírgula
+AI_MONTHLY_BUDGET_USD=10.0                  # budget do par tenant/feature no mês
+AI_MAX_OUTPUT_TOKENS=1200                   # teto de saída, aplicado no modelo
+AI_USAGE_LEDGER_PATH=data/ai_usage.jsonl    # o histórico de uso estimado
+```
+
+| Regra | O que faz |
+| --- | --- |
+| `AI_ALLOWED_MODELS` | Se o `OPENAI_CHAT_MODEL` não estiver na lista, a execução é bloqueada. Serve para impedir que alguém suba um modelo caro em produção sem passar por revisão |
+| `AI_MONTHLY_BUDGET_USD` | Se o gasto estimado do mês já alcançou o teto, a execução é bloqueada |
+| `AI_MAX_OUTPUT_TOKENS` | Vai direto para o `init_chat_model(..., max_tokens=...)`: limita o tamanho da resposta, e portanto o custo por chamada |
+
+Bloqueado, o usuário recebe uma resposta controlada — **não** um erro:
+
+```
+Esta solicitação não pode ser processada porque ultrapassa uma política operacional da aplicação.
+```
+
+`POST /chat` devolve `200` com essa resposta, `has_answer: false` e `sources: []`. Bloqueio
+de política não é falha de sistema; é o sistema funcionando.
+
+### O ledger
+
+Toda execução que **realmente chamou o modelo** grava uma linha em `data/ai_usage.jsonl`:
+
+```json
+{"request_id": "5ef56f73-...", "timestamp": "2026-08-08T16:07:47+00:00", "tenant": "fcai",
+ "feature": "rag_chat", "model": "gpt-4.1-mini", "input_tokens": 3522, "output_tokens": 198,
+ "total_tokens": 3720, "estimated_cost_usd": 0.000647}
+```
+
+É esse arquivo que a próxima requisição lê para saber o gasto do mês — o ciclo se fecha:
+usar consome budget, budget consumido bloqueia o uso. Contagens e custo, nunca pergunta,
+prompt, contexto, chunk ou resposta.
+
+**Isto não é billing.** A tabela de preços em `app/governance.py` é fictícia (`0.15 USD` por
+milhão de tokens de entrada, `0.60` de saída), o arquivo é local, o ledger é lido inteiro a
+cada requisição (não escala) e não há coordenação entre processos. É uma simulação
+arquitetural: o objetivo é mostrar **onde** a decisão mora e **como** ela se conecta ao que
+já era medido. Em produção isso seria um contador em banco ou Redis, com transação.
+
+A política vale para o pipeline de RAG. As ferramentas de comparação (`app.chat`,
+`app.context_chat`, `app.retrieve`) chamam modelo e embeddings direto, sem passar por ela —
+são de laboratório, de propósito.
+
+### Como isso aparece
+
+- **Spans**: `app.policy.allowed`, `app.policy.reason`, `app.budget.monthly_usd`,
+  `app.budget.current_spend_usd`, `app.estimated_cost_usd`
+- **Log estruturado**: `policy_allowed`, `policy_reason`, `monthly_budget_usd`,
+  `current_month_spend_usd`, `estimated_cost_usd`
+- **`--debug` e `"debug": true`**: um bloco `policy` com a decisão, o budget e o gasto
+
+Repare que o custo estimado atravessa as três camadas. Foi possível porque os tokens já
+eram medidos desde a etapa de observabilidade — governança não precisou de instrumentação
+nova, só deu **consequência** ao que já se media.
+
+```bash
+python -m app.rag_chat --debug                          # veja o bloco Policy
+AI_ALLOWED_MODELS=gpt-4o python -m app.rag_chat         # modelo fora da lista: bloqueia
+AI_MONTHLY_BUDGET_USD=0 python -m app.rag_chat          # budget esgotado: bloqueia
+cat data/ai_usage.jsonl                                 # o histórico
+```
+
 ## Ferramentas de inspeção e comparação
 
 - `python -m app.retrieve "sua pergunta"` — só a busca vetorial, sem chamar o modelo de
@@ -456,6 +529,7 @@ app/
   rerank.py        # escolhe quais chunks recuperados entram no prompt final
   rag_pipeline.py  # o pipeline completo, compartilhado pelo terminal e pela API
   observability.py # os spans de OpenTelemetry, isolados em um só lugar
+  governance.py    # política de modelo e budget, e o ledger de uso estimado
   rag_chat.py      # o chat no terminal
   api.py           # a API HTTP (FastAPI)
   retrieve.py      # busca isolada, sem modelo de chat

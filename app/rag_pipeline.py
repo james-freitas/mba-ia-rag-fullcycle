@@ -22,6 +22,14 @@ from pydantic import BaseModel, Field
 
 from app import observability
 from app.config import settings
+from app.governance import (
+    PolicyDecision,
+    build_usage_record,
+    check_policy,
+    estimate_cost_usd,
+    load_policy,
+    record_usage,
+)
 from app.query_planner import (
     SAFE_FILTERS,
     QueryPlan,
@@ -46,6 +54,10 @@ NO_ANSWER_MESSAGE = (
     "para responder com segurança."
 )
 FALLBACK_CLARIFICATION = "Pode detalhar melhor a sua pergunta?"
+POLICY_BLOCKED_MESSAGE = (
+    "Esta solicitação não pode ser processada porque ultrapassa uma política "
+    "operacional da aplicação."
+)
 
 SYSTEM_PROMPT = (
     "You are a support assistant for FCAI. "
@@ -145,7 +157,9 @@ class ModelUsage(BaseModel):
 
 class RagDebug(BaseModel):
     request_id: str
-    query_plan: QueryPlanDebug
+    policy: PolicyDecision | None = None
+    # Absent when the policy blocked the run: the planner was never called.
+    query_plan: QueryPlanDebug | None = None
     retrieved_chunks: list[RetrievalChunkDebug] = Field(default_factory=list)
     selected_chunk_ids: list[str] = Field(default_factory=list)
     timings: PipelineTimings = Field(default_factory=PipelineTimings)
@@ -205,6 +219,14 @@ def build_model_usage(usage_metadata: dict) -> list[ModelUsage]:
     ]
 
 
+def aggregate_tokens(model_usage: list[ModelUsage]) -> tuple[int, int, int]:
+    return (
+        sum(entry.input_tokens for entry in model_usage),
+        sum(entry.output_tokens for entry in model_usage),
+        sum(entry.total_tokens for entry in model_usage),
+    )
+
+
 def build_usage_attributes(usage_metadata: dict) -> dict:
     # Tokens of a single call: the model that answered plus its counters, or nothing
     # at all when the provider reported no usage.
@@ -240,11 +262,14 @@ class RagPipeline:
         # temperature=0: the planner is a classifier, and the same question must always
         # produce the same plan. With the default temperature it flip-flopped between
         # asking for clarification and guessing.
+        # The output cap comes from the policy, like the allowlist and the budget.
+        policy = load_policy(SAFE_FILTERS["tenant"], FEATURE_NAME)
         model = init_chat_model(
             settings.openai_chat_model,
             model_provider="openai",
             api_key=settings.openai_api_key,
             temperature=0,
+            max_tokens=policy.max_output_tokens,
         )
         self.planner = model.with_structured_output(QueryPlan)
         self.reranker = model.with_structured_output(RerankResult)
@@ -263,6 +288,11 @@ class RagPipeline:
 
         config = {"callbacks": [usage]}
 
+        # The policy is decided before anything runs: a blocked request never reaches
+        # the planner, the retrieval or the model.
+        policy = load_policy(SAFE_FILTERS["tenant"], FEATURE_NAME)
+        decision = check_policy(policy, settings.openai_chat_model)
+
         try:
             with _step(timings, "total_ms", observability.PIPELINE_SPAN) as span:
                 observability.set_attributes(
@@ -273,18 +303,34 @@ class RagPipeline:
                         observability.TENANT: SAFE_FILTERS["tenant"],
                         observability.PRODUCT: SAFE_FILTERS["product"],
                         observability.USE_RERANK: use_rerank,
+                        observability.POLICY_ALLOWED: decision.allowed,
+                        observability.POLICY_REASON: decision.reason,
+                        observability.MONTHLY_BUDGET_USD: decision.monthly_budget_usd,
+                        observability.CURRENT_SPEND_USD: decision.current_month_spend_usd,
                     },
                 )
                 observability.record_debug_content(span, question=question)
-                result = self._execute(
-                    question, use_rerank, request_id, timings, config, on_prompt
-                )
+
+                if decision.allowed:
+                    result = self._execute(
+                        question, use_rerank, request_id, timings, config, on_prompt
+                    )
+                else:
+                    result = self._blocked(request_id, decision, timings)
+
+                result.debug.policy = decision
+
+                model_usage = build_model_usage(usage.usage_metadata)
+                input_tokens, output_tokens, total_tokens = aggregate_tokens(model_usage)
+                estimated_cost_usd = estimate_cost_usd(input_tokens, output_tokens)
+
                 observability.set_attributes(
                     span,
                     {
                         observability.HAS_ANSWER: result.has_answer,
                         observability.NEEDS_CLARIFICATION: result.needs_clarification,
                         observability.SOURCES_COUNT: len(result.sources),
+                        observability.ESTIMATED_COST_USD: estimated_cost_usd,
                     },
                 )
                 # Also when it is a clarification question or a refusal.
@@ -306,13 +352,33 @@ class RagPipeline:
             raise
 
         debug = result.debug
-        debug.model_usage = build_model_usage(usage.usage_metadata)
+        debug.model_usage = model_usage
+
+        # Only a run that really called the model enters the ledger, and it is what
+        # the next request will read as the month's spend.
+        if model_usage:
+            record_usage(
+                build_usage_record(
+                    request_id,
+                    decision,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    estimated_cost_usd,
+                )
+            )
+
         _log_run(
             {
                 "request_id": request_id,
                 "has_answer": result.has_answer,
                 "needs_clarification": result.needs_clarification,
                 "used_rerank": use_rerank,
+                "policy_allowed": decision.allowed,
+                "policy_reason": decision.reason,
+                "monthly_budget_usd": decision.monthly_budget_usd,
+                "current_month_spend_usd": decision.current_month_spend_usd,
+                "estimated_cost_usd": estimated_cost_usd,
                 "retrieved_chunks_count": len(debug.retrieved_chunks),
                 "selected_chunks_count": len(debug.selected_chunk_ids),
                 "source_files": [source.source_file for source in result.sources],
@@ -446,6 +512,17 @@ class RagPipeline:
             needs_clarification=False,
             sources=sources,
             debug=debug,
+        )
+
+    def _blocked(
+        self, request_id: str, decision: PolicyDecision, timings: PipelineTimings
+    ) -> RagPipelineResult:
+        return RagPipelineResult(
+            answer=POLICY_BLOCKED_MESSAGE,
+            has_answer=False,
+            needs_clarification=False,
+            sources=[],
+            debug=RagDebug(request_id=request_id, policy=decision, timings=timings),
         )
 
     def _no_answer(self, debug: RagDebug) -> RagPipelineResult:

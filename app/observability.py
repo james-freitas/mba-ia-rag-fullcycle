@@ -73,6 +73,13 @@ FILTERS = "app.filters"
 SELECTED_CHUNKS_COUNT = "app.selected_chunks_count"
 TOTAL_TOKENS = "app.total_tokens"
 
+# Governance: what the policy decided and what the run is estimated to cost.
+POLICY_ALLOWED = "app.policy.allowed"
+POLICY_REASON = "app.policy.reason"
+MONTHLY_BUDGET_USD = "app.budget.monthly_usd"
+CURRENT_SPEND_USD = "app.budget.current_spend_usd"
+ESTIMATED_COST_USD = "app.estimated_cost_usd"
+
 # Debug events: the question and the answer, in development only.
 DEBUG_QUESTION_EVENT = "app.debug.question"
 DEBUG_ANSWER_EVENT = "app.debug.answer"
