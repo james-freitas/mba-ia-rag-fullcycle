@@ -755,11 +755,142 @@ Um caso que espera uma ferramenta que o agente não tem não é um caso que falh
 caso **immensurável**. Renomear uma ferramenta quebra a validação do dataset na hora, em
 vez de virar uma métrica misteriosamente zerada dois meses depois.
 
-### O que ainda não existe
+---
 
-O agente não foi executado nesta etapa, nenhuma ferramenta rodou, e não há experiment no
-Langfuse. Só o critério escrito antes de medir — que é a mesma ordem das cinco camadas
-anteriores.
+## Support agent evaluation
+
+```bash
+python -m app.eval_agent
+```
+
+Roda os 20 casos contra o agente e pontua **comportamento**, não resposta. Nove
+evaluators, todos determinísticos — comparação de lista contra o que o dataset escreveu.
+Sem Ragas e sem judge, de propósito: o objeto medido já é bastante não-determinístico, e
+um medidor com variação própria tornaria duas rodadas incomparáveis.
+
+| Score | O que cobra |
+| --- | --- |
+| `agent_tool_selection` | as ferramentas esperadas foram chamadas |
+| `agent_forbidden_tools` | as proibidas não foram |
+| `agent_argument_match` | argumentos mínimos, por **subset** — o `summary` é do agente |
+| `agent_trajectory_match` | a sequência, conforme `exact` / `in_order` / `any_order` |
+| `agent_max_steps` | não passou do teto de chamadas |
+| `agent_clarification` | perguntou de volta quando devia |
+| `agent_refusal` | recusou sem chamar nada |
+| `agent_ticket_creation` | abriu o chamado, e o id veio da ferramenta |
+| `agent_expected_terms` | a resposta contém os termos esperados |
+
+O `ticket_creation` é o que cruza as duas capturas: exige `ticket_created=true`, um
+`ticket_id` não vazio **e** `create_support_ticket` na trajetória. Um modelo afirmando um
+chamado que nunca abriu falha aqui.
+
+### Tickets falsos são resetados
+
+`create_support_ticket` acrescenta linhas, então uma segunda rodada pontuaria contra
+tickets da primeira. Antes de começar:
+
+```
+Resetting fake support tickets for evaluation...
+```
+
+É mais simples do que passar um `run_id` por uma ferramenta que esta etapa não deve
+alterar.
+
+### O resultado
+
+```
+Support Agent Evaluation Summary
+
+Dataset cases: 20
+
+Tool selection:    19/20
+Forbidden tools:   20/20
+Argument match:    4/5
+Trajectory match:  19/20
+Max steps:         20/20
+Clarification:     18/20
+Refusal:           0/3
+Ticket creation:   19/20
+Expected terms:    8/8
+```
+
+`Forbidden tools: 20/20` e `Max steps: 20/20` são resultados de verdade: o agente nunca
+chamou ferramenta proibida e nunca ficou tentando. Era o risco principal, e não se
+concretizou.
+
+E `Refusal: 0/3` é o resultado mais interessante do dia.
+
+### Três falhas, e só uma é do agente
+
+**`Refusal: 0/3` — o critério está errado, não o agente.** Olhe o caso:
+
+```
+input : Qual é a previsão do tempo amanhã?
+answer: Desculpe, mas não forneço informações sobre previsão do tempo. Posso ajudar
+        com questões relacionadas ao FCAI Cloud.
+tools : []
+flags : clarif=False ticket=False done=True
+```
+
+Recusa impecável: nenhuma ferramenta, nada inventado. O que reprova é o
+`task_completed=true` que o evaluator exige falso.
+
+Só que o agente está certo. `task_completed` significa "a solicitação foi tratada por
+inteiro" — e recusar **é** tratar por inteiro. Não sobrou nada pendente. O campo que
+deveria ser falso é o de clarificação, onde algo de fato ficou em aberto.
+
+**A métrica está certa como escrita e errada como definida.** É a mesma forma do
+`planner_doc_type_coverage` da aula de componentes. E a correção pertence a uma `v2` do
+critério — não a um ajuste feito depois de ver o resultado, que é exatamente o que a
+aula de calibração ensina a não fazer.
+
+**`agent_doc_billing_email` — a falha é herdada do pipeline.**
+
+```
+input : Para qual e-mail eu envio uma dúvida sobre faturamento?
+answer: Não encontrei na base de conhecimento o e-mail específico para dúvidas sobre
+        faturamento.
+tools : ['search_knowledge_base']
+```
+
+O agente escolheu a ferramenta certa. Ela é que não achou — e esse é o
+`company_email_financeiro`, o mesmo caso cujo retrieval falha desde a aula de evaluation
+por componente, três camadas abaixo.
+
+Ele então marcou `needs_clarification=true` e perguntou outra coisa, quando o certo seria
+dizer que a informação não está na base. Vale notar de onde vem essa ambiguidade: a
+ferramenta devolve só prosa, sem um campo dizendo que a busca voltou vazia.
+
+**`agent_ticket_p3_config_question` — genuinamente discutível.** *"Abra um chamado P3
+para uma dúvida de configuração de alertas."* A severidade está lá, mas qual é a dúvida
+não está. O agente pediu para especificar; o dataset esperava o chamado aberto.
+
+Um chamado dizendo "usuário tem uma dúvida sobre configuração de alertas" é quase inútil
+para quem vai atender. Este é um caso para reescrever, não um agente para consertar.
+
+### Flags
+
+```bash
+python -m app.eval_agent --limit 5
+python -m app.eval_agent --case-id agent_ticket_p1_outage
+python -m app.eval_agent --experiment-name fcai-support-triage-agent-baseline
+```
+
+Os agregados também vão para o dataset run no Langfuse (`agent_tool_selection_rate` e
+companhia), pelo mesmo motivo da aula de experiments: comparar duas rodadas separadas por
+semanas na interface exige que os números tenham sido enviados.
+
+### Custo
+
+Cada caso executa o agente, e os casos de documentação executam o pipeline de RAG inteiro
+por dentro. É a evaluation mais cara da série depois da de experiments. Comece por
+`--limit 5`.
+
+### Isso ainda não é gate de CI
+
+Nada aqui reprova build. E, olhando o resultado, ainda bem: dois dos três tipos de falha
+eram problema do critério ou de uma camada abaixo. Um portão automático teria bloqueado
+um merge por causa da definição de `task_completed`.
 
 ---
 
@@ -788,6 +919,7 @@ app/
   support_tools.py   # as três ferramentas do Support Triage Agent
   support_agent.py   # o agente que escolhe entre elas
   eval_agent_dataset.py # valida o dataset de comportamento do agente e sincroniza
+  eval_agent.py      # roda o agente contra o dataset e pontua a trajetória
 
 evals/             # os datasets e as sondas de calibração, em JSONL
 knowledge_base/    # os documentos Markdown com front matter
