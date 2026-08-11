@@ -566,13 +566,108 @@ A distinção importa para o agente: erro devolvido como dado é algo a que o mo
 reagir na mesma volta do laço; exceção é o runtime do agente que trata. E as duas coisas
 vão precisar ser avaliadas de formas diferentes.
 
-### O que ainda não existe
-
-Sem agente, sem `create_agent`, sem laço de tool calling. Sem dataset de trajetória e sem
-evaluation de qual ferramenta foi chamada, em que ordem, com quais argumentos.
+### Custo
 
 O `search_knowledge_base` **chama modelo** — é o pipeline de RAG inteiro. Por isso a demo
 padrão pula ele: as outras duas são leitura e escrita de arquivo, custo zero.
+
+---
+
+## Support Triage Agent
+
+```bash
+python -m app.support_agent
+python -m app.support_agent --debug
+```
+
+O Knowledge Chat tem um caminho só: pergunta entra, resposta sai. Aqui o modelo
+**decide** — responder pela documentação, ler o consumo do tenant, abrir um chamado,
+perguntar de volta, ou recusar.
+
+É um mini-projeto para estudar evaluation de tool calling. Ele **não substitui o
+Knowledge Chat** (na verdade usa, através de uma ferramenta) e não é uma implementação
+completa de agentes: um `create_agent`, três ferramentas, sem memória e sem
+multi-agente.
+
+### As cinco decisões
+
+| Pergunta | Ferramenta esperada |
+| --- | --- |
+| "Qual é o SLA para P1 no Enterprise?" | `search_knowledge_base` |
+| "Quanto de ingestão usamos este mês?" | `get_current_usage` |
+| "Abra um chamado P1, o painel está fora do ar" | `create_support_ticket` |
+| "Abre um chamado urgente aí" | **nenhuma** — pede esclarecimento |
+| "Qual a previsão do tempo amanhã?" | **nenhuma** — recusa |
+
+As duas últimas são as difíceis, e são o motivo de o agente existir como objeto de
+estudo. Chamar ferramenta demais é tão errado quanto chamar de menos — e abrir um chamado
+que ninguém pediu é o erro que tem consequência.
+
+### Trajetória, lida das mensagens
+
+```bash
+python -m app.support_agent --debug
+```
+
+```
+Answer: Neste mês, você usou 1320 GB de ingestão, 88% da cota de 1500 GB.
+
+Steps: 1
+  1. get_current_usage({'tenant_id': 'fcai'})
+  needs_clarification=False, ticket_created=False, task_completed=True
+  reason: Informar o uso atual de ingestão conforme solicitado.
+```
+
+As chamadas vêm do `AIMessage.tool_calls` que o framework registra — **nunca do texto que
+o modelo escreveu sobre si mesmo**. Uma trajetória reconstruída da narração do modelo
+estaria medindo a narração.
+
+É essa lista que a próxima aula vai avaliar: qual ferramenta, em que ordem, com quais
+argumentos.
+
+### Resultado validado
+
+O `response_format=SupportAgentResult` faz o agente devolver campos, não só prosa:
+
+```python
+class SupportAgentResult(BaseModel):
+    answer: str
+    needs_clarification: bool
+    ticket_created: bool
+    ticket_id: str | None
+    task_completed: bool
+    reason: str
+```
+
+`ticket_created` e `ticket_id` existem para poder cruzar com a trajetória: se o modelo
+disser que abriu um chamado e `create_support_ticket` não estiver na lista de calls, ele
+inventou. Isso é verificável **porque** as duas coisas são capturadas separadamente.
+
+### Um prompt que estava conservador demais
+
+Vale como exemplo de por que os cinco cenários existem. A primeira versão do system
+prompt dizia:
+
+> If severity, impact or a summary is missing, ask one clarification question.
+
+O modelo leu como checklist obrigatório e, diante de *"Abra um chamado P1 porque o painel
+está fora do ar para todos os usuários"* — que traz severidade e problema —, pediu
+"impacto detalhado e um resumo breve". Correto pela letra do prompt, errado pelo produto.
+
+A correção foi separar o que falta do que já foi dado:
+
+> To open a ticket you need two things: a severity, and what is broken. When the user
+> gives you both, that is enough: write the summary yourself. Do not ask for detail they
+> already gave.
+
+Nenhum código mudou. **Só o prompt** — e é exatamente esse tipo de regressão que a
+evaluation de trajetória vai pegar sem alguém testar à mão.
+
+### O que ainda não existe
+
+Sem dataset de agente, sem evaluation de trajetória, sem experiment no Langfuse para
+comparar duas versões do prompt. Cada rodada chama modelo — o agente sempre, e mais uma
+vez o pipeline inteiro quando ele decide buscar na base.
 
 ---
 
@@ -598,7 +693,8 @@ app/
   eval_experiment.py # duas variantes do pipeline, comparadas
   eval_runner.py     # roda o pipeline sobre o dataset, compartilhado pelas três acima
 
-  support_tools.py   # as ferramentas do futuro Support Triage Agent
+  support_tools.py   # as três ferramentas do Support Triage Agent
+  support_agent.py   # o agente que escolhe entre elas
 
 evals/             # o dataset e as sondas de calibração, em JSONL
 knowledge_base/    # os documentos Markdown com front matter
