@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from langfuse import Evaluation
 
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 from app.eval_dataset import (
     DATASET_NAME,
     DatasetError,
@@ -30,7 +30,13 @@ from app.eval_dataset import (
     item_field,
     select_items,
 )
-from app.eval_runner import EvalRunError, average, ensure_within_policy, save_report
+from app.eval_runner import (
+    REPORTS_DIR,
+    EvalRunError,
+    average,
+    ensure_within_policy,
+    save_report,
+)
 from app.governance import estimate_cost_usd
 from app.rag_pipeline import RagPipeline, aggregate_tokens
 
@@ -311,14 +317,36 @@ def print_report(report: dict) -> None:
             print(f"- {case_id}")
 
 
-def load_report(path: str) -> dict:
-    file = Path(path)
-    if not file.exists():
-        raise ExperimentError(f"report not found: {path}")
+def resolve_report(reference: str) -> Path:
+    path = Path(reference)
+    if path.exists():
+        return path
+
+    # A variant name resolves to its most recent report. The files carry a timestamp,
+    # and hunting for the right pair among a dozen of them is how the wrong two get
+    # compared — which the comparability check would then have to catch.
+    matches = sorted(REPORTS_DIR.glob(f"experiment_{reference}_*.json"))
+    if not matches:
+        raise ExperimentError(f"no report found for '{reference}'")
+    return matches[-1]
+
+
+def display_path(file: Path) -> str:
+    try:
+        return str(file.resolve().relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(file)
+
+
+def load_report(reference: str) -> dict:
+    file = resolve_report(reference)
+    # Flushed: which two files were picked has to reach the screen before any error
+    # about them does, or the message reads as being about the wrong pair.
+    print(f"Reading {display_path(file)}", flush=True)
     try:
         return json.loads(file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise ExperimentError(f"{path}: {exc}")
+        raise ExperimentError(f"{file}: {exc}")
 
 
 def ensure_comparable(baseline: dict, candidate: dict) -> None:
@@ -397,7 +425,7 @@ def parse_args() -> argparse.Namespace:
         "--compare",
         nargs=2,
         metavar=("BASELINE", "CANDIDATE"),
-        help="compare two saved reports, without running anything",
+        help="compare two runs: variant names take the latest report, or pass file paths",
     )
     return parser.parse_args()
 

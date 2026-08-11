@@ -21,6 +21,7 @@ from app.eval_experiment import (
     load_report,
     print_comparison,
     print_report,
+    resolve_report,
 )
 
 ANSWERABLE = {
@@ -165,8 +166,21 @@ def test_load_report_reads_what_build_report_wrote(tmp_path) -> None:
     path.write_text(json.dumps(built, ensure_ascii=False), encoding="utf-8")
 
     assert load_report(str(path))["summary"] == built["summary"]
-    with pytest.raises(ExperimentError, match="not found"):
+    with pytest.raises(ExperimentError, match="no report found"):
         load_report(str(tmp_path / "missing.json"))
+
+
+def test_a_variant_name_resolves_to_its_newest_report(tmp_path, monkeypatch) -> None:
+    import app.eval_experiment as module
+
+    monkeypatch.setattr(module, "REPORTS_DIR", tmp_path)
+    for stamp in ("20260101T000000Z", "20260202T000000Z"):
+        (tmp_path / f"experiment_baseline_{stamp}.json").write_text("{}", encoding="utf-8")
+
+    # Typing two timestamped paths by hand is how the wrong pair gets compared.
+    assert resolve_report("baseline").name == "experiment_baseline_20260202T000000Z.json"
+    with pytest.raises(ExperimentError, match="no report found"):
+        resolve_report("no-rerank")
 
 
 def test_score_names_and_labels_stay_in_sync() -> None:

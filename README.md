@@ -1283,7 +1283,26 @@ estava salvando.
 
 ### Como comparar
 
-Cada rodada salva um relatório em `data/eval_runs/`, e a comparação é local:
+São três comandos, nesta ordem. Os dois primeiros rodam os 37 casos e salvam um
+relatório em `data/eval_runs/`; o terceiro compara:
+
+```bash
+python -m app.eval_experiment --variant baseline     # ~3 min
+python -m app.eval_experiment --variant no-rerank    # ~3 min
+python -m app.eval_experiment --compare baseline no-rerank
+```
+
+O `--compare` aceita **nomes de variante** e pega o relatório mais recente de cada um —
+os arquivos têm timestamp, e caçar o par certo entre uma dúzia deles é justamente como
+se acaba comparando os dois errados. Ele imprime quais escolheu:
+
+```
+Reading data/eval_runs/experiment_baseline_20260811T201812Z.json
+Reading data/eval_runs/experiment_no-rerank_20260811T202029Z.json
+```
+
+Caminhos explícitos continuam funcionando, para comparar uma rodada antiga com a de
+hoje:
 
 ```bash
 python -m app.eval_experiment --compare \
