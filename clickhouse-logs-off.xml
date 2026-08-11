@@ -1,0 +1,14 @@
+<clickhouse>
+    <!-- Logs internos de profiling do ClickHouse, desligados. Não têm relação com os
+         dados do Langfuse: em um dia de uso o trace_log sozinho passou de 11 GiB e
+         730 milhões de linhas, enchendo o disco da VM do Docker e fazendo o MinIO
+         recusar a ingestão de traces e scores. Os dados do Langfuse (default.*)
+         ocupam menos de 1 MiB. query_log e error_log ficam de pé: são pequenos e
+         úteis quando o próprio banco é o suspeito. -->
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <part_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <processors_profile_log remove="1"/>
+</clickhouse>

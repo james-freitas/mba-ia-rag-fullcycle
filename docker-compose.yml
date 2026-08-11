@@ -125,6 +125,9 @@ services:
       CLICKHOUSE_PASSWORD: clickhouse
     volumes:
       - langfuse_clickhouse_data:/var/lib/clickhouse
+      # Sem isto o profiling interno do ClickHouse enche o disco da VM do Docker em
+      # cerca de um dia, e aí o MinIO passa a recusar traces e scores com HTTP 500.
+      - ./clickhouse-logs-off.xml:/etc/clickhouse-server/config.d/logs-off.xml:ro
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
