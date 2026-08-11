@@ -10,9 +10,10 @@ Nothing here calls the RAG pipeline: this step only creates the dataset.
 import argparse
 import sys
 
-# The single place the application imports a backend SDK. Tracing stays vendor-neutral
-# over OTLP (see app/observability.py), but datasets and experiments have no such
-# protocol: they are a Langfuse API, so here the dependency is the only way in.
+# The evaluation modules are the only place the application imports a backend SDK.
+# Tracing stays vendor-neutral over OTLP (see app/observability.py), but datasets and
+# experiments have no such protocol: they are a Langfuse API, so here the dependency
+# is the only way in.
 from langfuse import Langfuse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -105,11 +106,11 @@ def validate_dataset(cases: list[EvalCase]) -> list[str]:
     return errors
 
 
-def sync_dataset(cases: list[EvalCase]) -> int:
+def connect_langfuse() -> Langfuse:
     if not settings.langfuse_public_key or not settings.langfuse_secret_key:
         raise DatasetError(
-            "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are required to sync the "
-            "dataset. Set them in .env (see .env.example) or run with --validate-only."
+            "LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are required to reach the "
+            "dataset. Set them in .env (see .env.example)."
         )
 
     client = Langfuse(
@@ -120,21 +121,29 @@ def sync_dataset(cases: list[EvalCase]) -> int:
     if not client.auth_check():
         raise DatasetError(f"Langfuse rejected the credentials at {settings.langfuse_host}")
 
+    return client
+
+
+def build_item(case: EvalCase) -> dict:
+    return {
+        # The case id is the item id, so syncing again updates the item instead of
+        # creating a second copy of the same question.
+        "id": case.id,
+        "input": {"question": case.question},
+        # Whatever is not the item's identity or its input is the expectation.
+        "expected_output": case.model_dump(exclude={"id", "question"}),
+        # Repeated out of the expectation on purpose: here they are an index to
+        # group and filter the items by, not something the system has to produce.
+        "metadata": {"tags": case.tags},
+    }
+
+
+def sync_dataset(cases: list[EvalCase]) -> int:
+    client = connect_langfuse()
     client.create_dataset(name=DATASET_NAME, description=DATASET_DESCRIPTION)
 
     for case in cases:
-        # The case id is the item id, so syncing again updates the item instead of
-        # creating a second copy of the same question.
-        client.create_dataset_item(
-            dataset_name=DATASET_NAME,
-            id=case.id,
-            input={"question": case.question},
-            # Whatever is not the item's identity or its input is the expectation.
-            expected_output=case.model_dump(exclude={"id", "question"}),
-            # Repeated out of the expectation on purpose: here they are an index to
-            # group and filter the items by, not something the system has to produce.
-            metadata={"tags": case.tags},
-        )
+        client.create_dataset_item(dataset_name=DATASET_NAME, **build_item(case))
 
     client.flush()
     return len(cases)

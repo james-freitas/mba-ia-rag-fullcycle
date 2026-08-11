@@ -668,6 +668,188 @@ chama modelo e não sincroniza nada com o Langfuse. Ela só garante que o datase
 consistente para as aulas de evaluation que vêm a seguir — um caso quebrado apareceria lá
 como experiment falhando, com a culpa caindo no pipeline; aqui aparece como teste vermelho.
 
+## Component evaluation
+
+Até aqui nada tinha medido o pipeline de verdade: os testes de contrato usam um fake e o
+dataset só descreve o que se espera. Esta etapa é a primeira que **executa o pipeline
+real contra os casos** — e a primeira que custa dinheiro, porque chama o modelo.
+
+Mas ela para antes da resposta. Roda **query planner, filtros, retrieval e reranking**, e
+não chama o `ANSWER_PROMPT` nem o `RagAnswer`. O motivo é diagnóstico: quando a resposta
+final sai errada, a pergunta que importa é *onde* quebrou. Se o chunk certo nunca chegou
+ao prompt, avaliar a redação da resposta é medir a consequência em vez da causa.
+
+```bash
+RUN_COMPONENT_EVALS=true python -m app.eval_components
+```
+
+Sem a variável, o script se recusa a rodar:
+
+```
+RUN_COMPONENT_EVALS=true is required because this evaluation calls LLMs.
+```
+
+É controle de custo, e é proposital que seja chato: `python -m pytest` continua grátis e
+rodando em cada commit; isto aqui é uma decisão consciente de gastar tokens.
+
+### O que o target produz
+
+`component_target` recebe um item do dataset e devolve o estado dos três componentes,
+sem opinião sobre ele:
+
+```json
+{"query_plan": {"normalized_question": "...", "doc_types": ["sla", "plan"],
+                "plan": "enterprise", "exact_terms": ["P1"],
+                "needs_clarification": false, "search_query": "...", "filters": {}},
+ "retrieval": {"ran": true, "retrieved_count": 8,
+               "retrieved_source_files": ["product-support-sla.md"],
+               "retrieved_chunk_ids": ["..."]},
+ "reranking": {"ran": true, "selected_count": 4,
+               "selected_source_files": ["product-support-sla.md"],
+               "selected_chunk_ids": ["..."]}}
+```
+
+Ele reaproveita as funções do próprio pipeline — `build_planner_prompt`, `build_filters`,
+`build_search_query`, `search_chunks`, `build_rerank_prompt`, `select_reranked_documents`
+— com o mesmo `OPENAI_CHAT_MODEL` e `temperature=0`. Nenhum prompt é duplicado: se o
+prompt do planner mudar, a evaluation passa a medir o prompt novo, que é o ponto.
+
+E quando o planner pede esclarecimento, o target para ali, como a produção faz:
+`retrieval.ran=false`, `reranking.ran=false`, listas vazias.
+
+### Os seis scores
+
+Todos determinísticos — comparação de campo, sem judge e sem Ragas:
+
+| Score | Passa quando | Não se aplica quando |
+| --- | --- | --- |
+| `planner_clarification_match` | `needs_clarification` == `should_clarify` | — |
+| `planner_plan_match` | `plan` == `expected_plan` | o caso não espera plano |
+| `planner_doc_type_coverage` | todo `expected_doc_types` está em `doc_types` | o caso não espera doc types |
+| `retrieval_source_hit` | algum `accepted_source_files` foi recuperado | `should_answer=false` |
+| `rerank_source_kept` | algum `accepted_source_files` sobreviveu ao rerank | `should_answer=false` |
+| `clarification_skips_retrieval` | não houve retrieval nem reranking | `should_clarify=false` |
+
+"Não se aplica" é diferente de "passou". Um caso de recusa não tem fonte aceita para
+recuperar, e dar 1.0 a ele inflaria a métrica com casos que nunca foram testados. Por
+isso o avaliador devolve `None` nesses casos e **nenhum score é gravado** — o denominador
+do relatório é só o que era mensurável (`28/29`, e não `36/37`).
+
+Repare que os casos de clarificação e os de recusa caem os dois no mesmo guard: o
+`EvalCase` proíbe `should_answer` e `should_clarify` verdadeiros ao mesmo tempo, então
+`should_answer=false` cobre as duas famílias. É a razão de `retrieval_source_hit` ter
+denominador 29 e não 37 — os 4 ambíguos e os 4 negativos ficam de fora, e o relatório
+mostra isso como `(8 n/a)`.
+
+### O relatório
+
+```
+Component Evaluation Summary
+
+Dataset: fcai-knowledge-chat-v1
+Cases: 37
+
+Planner clarification match:     35/37  (0 n/a)
+Planner plan match:              14/15  (22 n/a)
+Planner doc type coverage:       19/29  (8 n/a)
+Retrieval source hit:            28/29  (8 n/a)
+Rerank source kept:              28/29  (8 n/a)
+Clarification skips retrieval:     3/4  (33 n/a)
+
+Failures
+
+planner_clarification_match:
+- ambiguous_chamado_urgente: expected clarification, got answered path
+- negative_consumo_atual: expected answered path, got clarification
+
+retrieval_source_hit:
+- company_email_financeiro: accepted company-info.md, retrieved billing-policy.md
+
+rerank_source_kept:
+- company_email_financeiro: accepted company-info.md, selected none
+
+clarification_skips_retrieval:
+- ambiguous_chamado_urgente: retrieval ran=True, reranking ran=True
+
+Langfuse run: http://localhost:3000/project/.../runs/9661cbae31d3f54e
+```
+
+A coluna `n/a` é o que impede a leitura errada do denominador. `Clarification skips
+retrieval: 3/4 (33 n/a)` diz de uma vez que a métrica só fazia sentido em 4 casos e que
+os outros 33 não foram nem julgados — sem ela, alguém pode ler `3/4` como se 33 casos
+tivessem sumido. E `Planner clarification match` com `0 n/a` mostra que essa é a única
+métrica que se aplica ao dataset inteiro.
+
+O relatório é a única peça onde um "não se aplica" poderia virar uma falha sem ninguém
+perceber, então ele tem teste próprio em `tests/test_component_report.py` — sem modelo,
+sem banco e sem Langfuse, montando as avaliações na mão. Um deles existe só para travar
+o caso perigoso: se um evaluator passar a devolver `0.0` onde devolvia `None`, a suíte
+quebra em vez de a métrica encolher em silêncio.
+
+As falhas vêm agrupadas **por métrica**, não por caso, porque a pergunta que o relatório
+responde é "qual componente está sangrando". Um caso que aparece em duas listas — como o
+`ambiguous_chamado_urgente` acima — errou a bifurcação e levou junto tudo que dependia
+dela.
+
+Os mesmos scores ficam no Langfuse, item a item, com o `comment` acima como razão. O
+terminal serve para agir agora; o Langfuse serve para comparar esta rodada com a próxima,
+depois que alguém mexer no prompt do planner.
+
+### O que esses números dizem
+
+Vale ler o resultado real acima, porque ele é mais interessante do que "está bom":
+
+**`Planner doc type coverage: 19/29` é o pior score, e mesmo assim `Retrieval source hit`
+é 28/29.** Dez casos falharam a cobertura de doc types sem prejudicar a busca. O padrão
+dominante: na maioria faltou `product`, quase sempre porque o planner escolheu só `plan`.
+O chunk certo estava no `plan` mesmo, então a busca achou assim.
+
+Some os dois: **doze dos treze casos reprovados chegaram no documento certo.** O único
+que de fato falhou em recuperar foi o `company_email_financeiro`.
+
+Isso não é o planner errando — é a expectativa sendo mais rígida do que o necessário. O
+critério exige que *todos* os tipos esperados apareçam, quando o que importa de fato é
+que o filtro não elimine o documento que responde. É exatamente o tipo de coisa que só
+aparece quando se mede: a métrica está certa como escrita e errada como definida, e a
+correção é da `v2` do dataset, não do código.
+
+**`company_email_financeiro` é a falha que importa.** Retrieval e rerank falharam juntos:
+a pergunta pelo e-mail do financeiro trouxe `billing-policy.md`, que fala de cobrança mas
+não tem o endereço, e o rerank descartou tudo. O documento certo, `company-info.md`, nunca
+entrou — falha de verdade, e localizada antes de qualquer resposta ser gerada.
+
+**`ambiguous_chamado_urgente` não pediu esclarecimento** e por isso quebrou dois scores
+de uma vez, o que é o comportamento correto do medidor: seguir pelo caminho errado leva
+junto tudo o que dependia da bifurcação.
+
+### Flags
+
+```bash
+RUN_COMPONENT_EVALS=true python -m app.eval_components
+RUN_COMPONENT_EVALS=true python -m app.eval_components --limit 5
+RUN_COMPONENT_EVALS=true python -m app.eval_components --case-id company_email_financeiro
+RUN_COMPONENT_EVALS=true python -m app.eval_components --no-rerank
+RUN_COMPONENT_EVALS=true python -m app.eval_components --no-langfuse
+```
+
+| Flag | Efeito |
+| --- | --- |
+| `--limit N` | roda só os N primeiros casos |
+| `--case-id ID` | roda um caso só — o ciclo curto para depurar uma falha |
+| `--no-rerank` | avalia o retrieval cru; `rerank_source_kept` some do relatório em vez de virar falha |
+| `--no-langfuse` | lê o JSONL local, roda e imprime, sem gravar score nenhum |
+
+`--no-rerank` responde a uma pergunta específica: quando um caso falha, o chunk não foi
+encontrado ou foi encontrado e descartado? Se `retrieval_source_hit` passa sem rerank e
+`rerank_source_kept` falha com ele, a culpa é do reranker.
+
+### O que esta etapa ainda não é
+
+Nenhuma resposta foi gerada e nenhuma foi julgada. Não há LLM-as-a-judge, não há Ragas,
+não há agente e nada disso bloqueia commit. O que existe é o mapa de onde o pipeline erra
+antes de escrever a primeira palavra da resposta — que é o que torna a avaliação da
+resposta, depois, interpretável.
+
 ## Ferramentas de inspeção e comparação
 
 - `python -m app.retrieve "sua pergunta"` — só a busca vetorial, sem chamar o modelo de
@@ -708,6 +890,7 @@ app/
   observability.py # os spans de OpenTelemetry, isolados em um só lugar
   governance.py    # política de modelo e budget, e o ledger de uso estimado
   eval_dataset.py  # valida o dataset de evaluation e sincroniza com o Langfuse
+  eval_components.py # avalia planner, retrieval e rerank, sem gerar resposta
   rag_chat.py      # o chat no terminal
   api.py           # a API HTTP (FastAPI)
   retrieve.py      # busca isolada, sem modelo de chat
@@ -715,7 +898,7 @@ app/
   context_chat.py  # chat com um documento inteiro no prompt (comparação)
 knowledge_base/    # os documentos Markdown com front matter
 evals/             # o dataset de evaluation em JSONL, versionado com o código
-tests/             # contrato da API (com fake) e validação do dataset
+tests/             # contrato da API (com fake), dataset e relatório da evaluation
 pytest.ini         # testpaths e pythonpath dos testes
 test.http          # requests prontos para a extensão REST Client
 docker-compose.yml
