@@ -663,11 +663,103 @@ A correção foi separar o que falta do que já foi dado:
 Nenhum código mudou. **Só o prompt** — e é exatamente esse tipo de regressão que a
 evaluation de trajetória vai pegar sem alguém testar à mão.
 
+### Custo
+
+Cada rodada chama modelo — o agente sempre, e mais uma vez o pipeline inteiro quando ele
+decide buscar na base.
+
+---
+
+## Support agent evaluation dataset
+
+```bash
+python -m app.eval_agent_dataset --validate-only   # valida o JSONL, offline
+python -m app.eval_agent_dataset                   # valida e sincroniza
+```
+
+`evals/support_triage_agent.jsonl` — 20 casos. O dataset do Knowledge Chat guarda
+**respostas esperadas**; este guarda **comportamento esperado**.
+
+A diferença importa: um agente que chega na resposta certa pelas ferramentas erradas é
+outro sistema. Só o segundo é seguro de mudar depois.
+
+```json
+{"id": "agent_chain_usage_then_ticket",
+ "input": "Estamos perto do limite de logs? Se estivermos acima de 85%, abra um chamado P2.",
+ "should_answer": true, "should_clarify": false,
+ "should_create_ticket": true, "should_refuse": false,
+ "expected_tools": ["get_current_usage", "create_support_ticket"],
+ "forbidden_tools": ["search_knowledge_base"],
+ "expected_arguments": {"create_support_ticket": {"severity": "P2"}},
+ "expected_trajectory": ["get_current_usage", "create_support_ticket"],
+ "trajectory_match_type": "in_order", "max_steps": 2,
+ "expected_terms": ["88"], "tags": ["agent", "chained", "usage", "ticket"]}
+```
+
+| Campo | O que cobra |
+| --- | --- |
+| `expected_tools` | as que **deveriam** ser chamadas |
+| `forbidden_tools` | as que **não** deveriam — chamar demais é erro tão real quanto de menos |
+| `expected_arguments` | argumentos mínimos: aqui, `severity` tem que ser `P2` |
+| `expected_trajectory` | a **sequência** esperada |
+| `trajectory_match_type` | `exact`, `in_order` ou `any_order` |
+| `max_steps` | teto de chamadas — o freio contra o agente que fica tentando |
+
+### As cinco famílias, e as duas armadilhas
+
+| Família | Casos | O que verifica |
+| --- | --- | --- |
+| Documentação | 5 | usa `search_knowledge_base`, e só |
+| Uso atual | 5 | usa `get_current_usage`, e só |
+| Ticket claro | 4 | abre com a severidade pedida |
+| Ambíguo | 3 | **não** abre, pergunta de volta |
+| Fora de escopo | 3 | recusa sem chamar nada |
+
+Duas famílias existem só para pegar erro de escolha, não de resposta.
+
+**A confusão política × dado vivo.** Dois casos quase idênticos em português:
+
+- *"O que acontece se eu ultrapassar a cota de ingestão?"* → é **regra**, está num documento
+- *"Quanto eu já usei da minha cota neste mês?"* → é **estado**, está num sistema
+
+Estão marcados com a tag `confusion-pair`. Um agente que responde consumo lendo
+documentação inventa número; um que responde política lendo o consumo não tem o que
+dizer. Os dois erros passariam por uma avaliação que só olha a resposta final.
+
+**O caso encadeado.** Sem ele, todos os casos esperariam uma ferramenta só, e
+`expected_trajectory` e `trajectory_match_type` seriam maquinário que nada testa. Por isso
+a validação **reprova o dataset** se nenhum caso tiver mais de um passo:
+
+```python
+if not any(len(case.expected_trajectory) > 1 for case in cases):
+    errors.append("no case expects more than one tool: the trajectory is never tested")
+```
+
+### As regras que o validador impõe
+
+Treze, e todas verificadas. As que valem citar:
+
+- `should_clarify` e `should_create_ticket` não podem ser verdadeiros juntos, nem
+  `should_refuse` com `should_create_ticket` — são desfechos que se excluem
+- caso de recusa ou de clarificação **não pode esperar ferramenta nenhuma**
+- `expected_trajectory` não pode conter ferramenta fora de `expected_tools`
+- `len(expected_trajectory)` não pode passar de `max_steps`
+
+E a mais importante: os nomes de ferramenta válidos vêm do próprio código.
+
+```python
+TOOL_NAMES = frozenset(tool.name for tool in SUPPORT_TOOLS)
+```
+
+Um caso que espera uma ferramenta que o agente não tem não é um caso que falha — é um
+caso **immensurável**. Renomear uma ferramenta quebra a validação do dataset na hora, em
+vez de virar uma métrica misteriosamente zerada dois meses depois.
+
 ### O que ainda não existe
 
-Sem dataset de agente, sem evaluation de trajetória, sem experiment no Langfuse para
-comparar duas versões do prompt. Cada rodada chama modelo — o agente sempre, e mais uma
-vez o pipeline inteiro quando ele decide buscar na base.
+O agente não foi executado nesta etapa, nenhuma ferramenta rodou, e não há experiment no
+Langfuse. Só o critério escrito antes de medir — que é a mesma ordem das cinco camadas
+anteriores.
 
 ---
 
@@ -695,8 +787,9 @@ app/
 
   support_tools.py   # as três ferramentas do Support Triage Agent
   support_agent.py   # o agente que escolhe entre elas
+  eval_agent_dataset.py # valida o dataset de comportamento do agente e sincroniza
 
-evals/             # o dataset e as sondas de calibração, em JSONL
+evals/             # os datasets e as sondas de calibração, em JSONL
 knowledge_base/    # os documentos Markdown com front matter
 tests/             # contrato da API, dataset e a matemática dos relatórios
 data/
