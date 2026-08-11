@@ -1,0 +1,10 @@
+{
+  "tenant_id": "fcai",
+  "plan": "enterprise",
+  "cycle": "2026-01",
+  "logs_ingested_gb": 1320,
+  "logs_quota_gb": 1500,
+  "usage_percentage": 88,
+  "projected_overage_gb": 0,
+  "status": "normal"
+}

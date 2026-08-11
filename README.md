@@ -487,6 +487,95 @@ pipeline não é determinístico, então rodadas iguais dão números levemente 
 
 ---
 
+## Support agent tools
+
+O Knowledge Chat responde perguntas. Um **Support Triage Agent** faria mais: consultaria
+o consumo do cliente, decidiria se o caso vira chamado, e abriria o chamado.
+
+Esta etapa cria só as **ferramentas** que ele vai usar. Ainda não existe agente, e nada
+aqui é avaliado — mas as decisões de agora determinam o que será possível medir depois.
+
+```bash
+python -m app.support_tools                      # só as duas locais, custo zero
+python -m app.support_tools --include-rag-tool   # também a de RAG, que chama modelo
+```
+
+### As três, e por que são essas
+
+Elas cobrem os três tipos de coisa que um agente faz:
+
+| Ferramenta | O que é | Fonte |
+| --- | --- | --- |
+| `search_knowledge_base` | **consultar** — reusa o `RagPipeline` inteiro | a base indexada |
+| `get_current_usage` | **ler estado** — dado transacional simulado | `data/current_usage.json` |
+| `create_support_ticket` | **agir** — escreve, e é a que se observa de perto | `data/support_tickets.jsonl` |
+
+`search_knowledge_base` devolve `answer` e as fontes, e só. Prompt, chunks e o payload de
+debug ficam dentro do pipeline: transcrição de agente não é lugar para eles.
+
+Os dois arquivos em `data/` são falsos, e de naturezas diferentes. O `current_usage.json`
+é **dado semente** — versionado, porque a ferramenta não funciona sem ele (é a única
+exceção ao `data/` no `.gitignore`). O `support_tickets.jsonl` é **artefato de execução**,
+criado pela ferramenta e fora do git.
+
+Nada sai daqui: nenhum e-mail, nenhum sistema externo. O ticket é uma linha num arquivo.
+
+### Ferramentas pequenas são ferramentas avaliáveis
+
+Foi o critério de desenho. Uma ferramenta que faz uma coisa legível é uma ferramenta cuja
+chamada dá para dizer, depois, se foi certa ou errada. `create_support_ticket` recebendo
+`severity` e `summary` é verificável; um `handle_support_request` genérico não seria.
+
+E as descrições delas são o que o modelo lê para decidir. Por isso dizem também o que
+**não** é para fazer:
+
+```python
+"""Open a support ticket.
+
+Use ONLY when the user clearly asks to open one. Answering a question, however
+urgent it sounds, is not a request for a ticket.
+"""
+```
+
+Essa frase existe porque "meu sistema caiu, qual o SLA do P1?" é uma pergunta, não um
+pedido de chamado — e é exatamente onde um agente mal instruído abre ticket sozinho.
+
+### Duas validações, em dois lugares diferentes
+
+O `@tool` transforma a assinatura num schema, e o `Literal["P1", "P2", "P3"]` vira um
+enum que o modelo lê antes de chamar. Um valor fora dele é rejeitado pelo Pydantic
+**antes de a função rodar** — e isso levanta exceção, não devolve JSON:
+
+```
+ValidationError: Input should be 'P1', 'P2' or 'P3'
+```
+
+Já "o summary não pode ser vazio" o schema não consegue expressar. Essa fica dentro da
+função, e volta como dado:
+
+```
+{"error": "summary must not be empty"}
+{"error": "unknown tenant: acme"}
+```
+
+**O schema valida o que ele consegue expressar; a função valida o resto.** Eu tinha
+escrito uma checagem de `severity` dentro da função também, achando que era defesa em
+profundidade — o type checker apontou que era código inalcançável, e ele estava certo.
+
+A distinção importa para o agente: erro devolvido como dado é algo a que o modelo pode
+reagir na mesma volta do laço; exceção é o runtime do agente que trata. E as duas coisas
+vão precisar ser avaliadas de formas diferentes.
+
+### O que ainda não existe
+
+Sem agente, sem `create_agent`, sem laço de tool calling. Sem dataset de trajetória e sem
+evaluation de qual ferramenta foi chamada, em que ordem, com quais argumentos.
+
+O `search_knowledge_base` **chama modelo** — é o pipeline de RAG inteiro. Por isso a demo
+padrão pula ele: as outras duas são leitura e escrita de arquivo, custo zero.
+
+---
+
 ## Estrutura
 
 ```
@@ -509,9 +598,14 @@ app/
   eval_experiment.py # duas variantes do pipeline, comparadas
   eval_runner.py     # roda o pipeline sobre o dataset, compartilhado pelas três acima
 
+  support_tools.py   # as ferramentas do futuro Support Triage Agent
+
 evals/             # o dataset e as sondas de calibração, em JSONL
 knowledge_base/    # os documentos Markdown com front matter
 tests/             # contrato da API, dataset e a matemática dos relatórios
-data/eval_runs/    # relatórios das execuções (fora do git)
+data/
+  current_usage.json    # dado fake do tenant, versionado (a ferramenta precisa dele)
+  support_tickets.jsonl # tickets fake criados pela ferramenta (fora do git)
+  eval_runs/            # relatórios das execuções (fora do git)
 docs/pipeline.md   # como o RAG funciona por dentro
 ```

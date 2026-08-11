@@ -2,6 +2,10 @@
 .env
 __pycache__/
 *.pyc
-data/
+# The contents, not the directory: git will not descend into an excluded directory, so
+# data/ would make the negation below unreachable.
+data/*
+# Seed data, not a run artifact: the usage tool reads it, so a fresh clone needs it.
+!data/current_usage.json
 CLAUDE.local.md
 .playwright-cli/
