@@ -1013,6 +1013,204 @@ Não há agente, não há tool calling, não há gate de CI, e o resultado ainda
 experiment no Langfuse. Um `run_id` por execução em `data/eval_runs/` é o suficiente
 para comparar duas rodadas à mão — que é o passo antes de comparar de forma automática.
 
+## LLM-as-a-judge evaluation
+
+O Ragas mede propriedades que outra pessoa definiu. Um judge é o movimento oposto: você
+escreve o que "resposta boa" significa **neste produto**, e um modelo aplica essa
+definição.
+
+```bash
+python -m app.eval_judge
+```
+
+Isso alcança o que uma métrica pronta não consegue nomear — se a resposta cobre o que a
+pergunta precisava, se ela é clara — ao preço de ser a opinião de um modelo. Por isso a
+rubrica fica escrita no código, e não implícita: assim ela pode ser revisada, discutida
+e versionada.
+
+### A rubrica é o contrato
+
+Cinco critérios, cada um de 0 a 1, cada um com os três pontos de ancoragem escritos:
+
+| Critério | 1.0 | 0.5 | 0.0 |
+| --- | --- | --- | --- |
+| `groundedness` | tudo sustentado pelo contexto | parcialmente, com extrapolações | afirmação importante sem apoio |
+| `relevance` | responde diretamente | responde em parte | irrelevante |
+| `completeness` | cobre o que a pergunta pedia | falta algo que **estava** no contexto | insuficiente |
+| `source_support` | as fontes sustentam a resposta | relacionadas, mas não sustentam tudo | não sustentam |
+| `clarity` | clara e objetiva | compreensível, mas confusa | difícil de entender |
+
+O `overall_score` **não é a média** — groundedness e relevância pesam mais que estilo,
+porque uma resposta bem escrita e sem apoio no contexto é uma resposta ruim.
+
+Duas instruções no prompt importam tanto quanto os critérios: o judge é proibido de usar
+conhecimento externo (se o contexto não diz, não está sustentado, por mais verdadeiro
+que soe), e é instruído a não premiar resposta longa nem punir resposta curta.
+
+### Saída estruturada, não texto solto
+
+```python
+class JudgeVerdict(BaseModel):
+    groundedness_score: float = Field(ge=0.0, le=1.0, ...)
+    ...
+    passes: bool
+    reason: str
+    main_issue: MainIssue | None
+```
+
+O veredito vem por `init_chat_model(...).with_structured_output(JudgeVerdict)`. Um judge
+que resolve escrever um ensaio em vez de dar notas **quebra na validação do Pydantic**,
+em vez de produzir um score inutilizável que ninguém percebe.
+
+O limiar de aprovação é decisão da aplicação, não do modelo:
+
+```python
+def passed(verdict: JudgeVerdict, min_score: float) -> bool:
+    return verdict.overall_score >= min_score
+```
+
+O prompt **não** informa o limiar ao judge — se informasse, ele ancoraria as notas em
+volta da linha de corte e duas rodadas com `--min-score` diferente deixariam de ser
+comparáveis. O judge responde uma pergunta mais simples ("você entregaria essa resposta
+como está?"), e o corte é aplicado depois, por `--min-score`.
+
+O veredito do modelo é preservado no relatório como `judge_would_ship`, ao lado do
+`passes` calculado. Quando os dois discordam — o judge aprovando uma resposta que ele
+mesmo pontuou abaixo da barra — isso é descalibração, e é exatamente o que você quer ver
+em vez de sobrescrever.
+
+### Calibrar antes de confiar
+
+Rodando os 29 casos respondíveis, o judge deu **1.00 em todos os critérios, em todos os
+28 casos julgados**. Um judge que nunca discrimina não carrega informação nenhuma — e
+esse número tem duas explicações opostas: ou o pipeline é muito bom, ou a rubrica é
+frouxa. **Do lado de fora, os dois casos são idênticos.**
+
+A única forma de saber é dar a ele respostas que você sabe que são ruins:
+
+```bash
+python -m app.eval_judge --calibrate
+```
+
+```
+Judge Calibration (rubric v2, model gpt-4.1-mini)
+
+grounded_answer     overall=1.00  grounded=1.00  clarity=1.00  issue=none               ok
+invented_claim      overall=0.30  grounded=0.00  clarity=1.00  issue=unsupported_claim  ok
+off_topic           overall=0.00  grounded=0.00  clarity=1.00  issue=irrelevant_answer  ok
+incomplete_answer   overall=0.30  grounded=0.00  clarity=1.00  issue=incomplete_answer  ok
+unclear_answer      overall=0.90  grounded=1.00  clarity=0.50  issue=unclear_answer     ok
+weak_source_support overall=1.00  grounded=1.00  clarity=1.00  issue=none               KNOWN GAP: ...
+
+5/5 probes behaved as expected.
+1 known gap(s) above: documented, not fixed.
+```
+
+Ele discrimina, e pelo motivo certo. Então o 1.00 dos 28 casos é o pipeline sendo bom —
+conclusão que só se sustenta **porque** foi testada.
+
+As sondas ficam em `evals/judge_calibration.jsonl`, versionadas junto do código, pelo
+mesmo motivo do dataset principal: critério que você pode editar depois de ver o
+resultado não é critério. Cada linha é uma resposta escrita à mão para estar errada de
+**um** jeito, e o critério que deveria perceber:
+
+```json
+{"id": "invented_claim",
+ "answer": "No plano Pro, o P1 tem resposta em até 30 minutos, com gerente dedicado 24x7.",
+ "expected_issue": "unsupported_claim",
+ "at_most": {"groundedness_score": 0.5, "overall_score": 0.5}}
+```
+
+Repare que a cobrança é **por critério**, não pelo `overall`. A sonda `unclear_answer` é
+uma resposta correta, fiel e prolixa: ela cobra `clarity_score <= 0.6` e deixa o overall
+em paz, porque a própria rubrica diz que estilo pesa menos que fidelidade. Uma sonda que
+cobrasse overall ali estaria contradizendo a rubrica que ela deveria testar.
+
+### O que a calibração encontrou
+
+Ela não foi cerimônia — achou dois problemas na primeira execução.
+
+**A rubrica de clareza estava frouxa.** A resposta prolixa passava com `clarity=1.00`.
+O texto dizia só "1.0: clear and objective", o que é fácil demais de satisfazer. Depois
+de trocar por "vai direto à resposta, sem preâmbulo e sem nada para pular", a mesma
+sonda passou a dar `clarity=0.50` com `main_issue=unclear_answer` — e o `overall` ficou
+em 0.90, que é o comportamento correto. Isso é o `RUBRIC_VERSION` indo de 1 para 2.
+
+**E o `source_support_score` era immensurável.** O judge recebe as fontes como nomes de
+arquivo (`pro-plan.md`) e o contexto como texto sem atribuição — não existe como ligar
+um ao outro. Ele fazia o que dava: via a resposta sustentada pelo contexto e dava 1.00.
+
+Essa sonda continua no arquivo, marcada com `known_gap`: ela reporta o problema sem
+reprovar a rodada. Consertar de verdade exige o pipeline entregar a origem de cada
+trecho junto do texto, o que é mudança no `on_context` — fora do escopo desta etapa, e
+visível para quem for fazer.
+
+**A lição é essa:** a calibração não confirmou que estava tudo bem. Ela achou um critério
+frouxo e um critério impossível — e os dois estavam invisíveis enquanto todo mundo
+pontuava 1.00.
+
+### O que ele não substitui
+
+| Camada | Mede | Custa |
+| --- | --- | --- |
+| Testes de contrato | a forma da API | nada |
+| Evaluation por componente | onde a informação se perdeu | LLM |
+| Ragas | propriedades nomeadas da resposta | LLM |
+| **Judge** | a rubrica **deste** produto | LLM |
+
+O judge não substitui nenhuma das anteriores. Ele é a opinião mais rica e a menos
+verificável das quatro — os testes determinísticos continuam sendo o chão.
+
+### Falha antes do judge
+
+Um caso `should_answer=true` que volta sem resposta não tem o que ser julgado. Entra como
+`failed_before_judge` e fica fora das médias, pelo mesmo motivo do Ragas: nota zero
+misturaria "a resposta estava ruim" com "não houve resposta".
+
+Na rodada completa foi 1 caso — o `company_email_financeiro`, o mesmo cujo retrieval
+falha desde a aula de evaluation por componente.
+
+### Nomes de score estáveis
+
+O relatório carrega um bloco `score_names`:
+
+```json
+{"groundedness_score": "judge_groundedness", "overall_score": "judge_overall", ...}
+```
+
+Ainda não existe experiment no Langfuse aqui. Mas quando existir, esses são os nomes que
+os scores vão ter — e um score que muda de nome entre rodadas não pode ser comparado
+consigo mesmo.
+
+Pelo mesmo motivo o relatório carrega `rubric_version`. Comparando dois arquivos em
+`data/eval_runs/` à mão, sem esse carimbo não dá para separar "o pipeline melhorou" de
+"eu afrouxei a rubrica".
+
+### Flags e modelo
+
+```bash
+python -m app.eval_judge --calibrate
+python -m app.eval_judge --limit 5
+python -m app.eval_judge --case-id sla_p1_enterprise
+python -m app.eval_judge --no-rerank
+python -m app.eval_judge --min-score 0.9
+```
+
+`--calibrate` é o único que não toca o pipeline nem o banco: são seis chamadas ao judge
+com respostas escritas à mão. Sai com código 1 quando alguma sonda se comporta fora do
+esperado — ainda não é gate de CI, mas já é o comando que você roda depois de mexer na
+rubrica.
+
+Por padrão o judge usa o mesmo `OPENAI_CHAT_MODEL` do pipeline. Dá para separar com
+`OPENAI_JUDGE_MODEL` no `.env` — útil no dia em que o modelo que responde mudar, para
+que o critério não mude junto. Sem a variável, nada quebra: ela cai no modelo do chat.
+
+### Custo
+
+Uma chamada de julgamento por caso, além da rodada completa do pipeline. É mais barato
+que o Ragas, que chama o modelo várias vezes por métrica — mas continua sendo custo real.
+Comece por `--limit 3`.
+
 ## Ferramentas de inspeção e comparação
 
 - `python -m app.retrieve "sua pergunta"` — só a busca vetorial, sem chamar o modelo de
@@ -1055,13 +1253,15 @@ app/
   eval_dataset.py  # valida o dataset de evaluation e sincroniza com o Langfuse
   eval_components.py # avalia planner, retrieval e rerank, sem gerar resposta
   eval_ragas.py    # avalia a resposta final contra o contexto usado, com Ragas
+  eval_judge.py    # julga a resposta final por uma rubrica, com structured output
+  eval_runner.py   # roda o pipeline real sobre o dataset, para os dois acima
   rag_chat.py      # o chat no terminal
   api.py           # a API HTTP (FastAPI)
   retrieve.py      # busca isolada, sem modelo de chat
   chat.py          # chat sem RAG (comparação)
   context_chat.py  # chat com um documento inteiro no prompt (comparação)
 knowledge_base/    # os documentos Markdown com front matter
-evals/             # o dataset de evaluation em JSONL, versionado com o código
+evals/             # o dataset de evaluation e as sondas de calibração do judge, em JSONL
 tests/             # contrato da API (com fake), dataset e relatório da evaluation
 pytest.ini         # testpaths e pythonpath dos testes
 test.http          # requests prontos para a extensão REST Client

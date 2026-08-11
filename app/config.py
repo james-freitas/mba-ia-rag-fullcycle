@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(..., alias="OPENAI_API_KEY")
     openai_chat_model: str = Field(..., alias="OPENAI_CHAT_MODEL")
     openai_embedding_model: str = Field(..., alias="OPENAI_EMBEDDING_MODEL")
+    # Optional: lets the judge run on a different model from the one it grades, which
+    # is what you want the day the answering model changes. Empty means "the same one".
+    openai_judge_model: str = Field("", alias="OPENAI_JUDGE_MODEL")
     database_url: str = Field(..., alias="DATABASE_URL")
 
     app_env: Environment = Field(DEVELOPMENT, alias="APP_ENV")
@@ -45,6 +48,10 @@ class Settings(BaseSettings):
     langfuse_public_key: str = Field("", alias="LANGFUSE_PUBLIC_KEY")
     langfuse_secret_key: str = Field("", alias="LANGFUSE_SECRET_KEY")
     langfuse_host: str = Field("http://localhost:3000", alias="LANGFUSE_HOST")
+
+    @property
+    def judge_model(self) -> str:
+        return self.openai_judge_model or self.openai_chat_model
 
     @property
     def psycopg_dsn(self) -> str:

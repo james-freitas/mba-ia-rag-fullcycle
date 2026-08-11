@@ -79,7 +79,8 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages(
 PromptCallback = Callable[[str, PromptValue], None]
 
 # How the chunk texts leave the pipeline: handed to a callback the caller owns, and
-# never placed on the result. Only app/eval_ragas.py passes one — see run_for_evaluation.
+# never placed on the result. Only app/eval_runner.py passes one, on behalf of the
+# evaluation scripts — see run_for_evaluation.
 ContextCallback = Callable[[list[str]], None]
 
 # Which product surface these traces come from. Tenant and product are the ones the
