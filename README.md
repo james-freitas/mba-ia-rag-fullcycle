@@ -850,6 +850,169 @@ não há agente e nada disso bloqueia commit. O que existe é o mapa de onde o p
 antes de escrever a primeira palavra da resposta — que é o que torna a avaliação da
 resposta, depois, interpretável.
 
+## Ragas evaluation
+
+A evaluation por componente para **antes** da resposta e pergunta se o pipeline chegou
+nos documentos certos. Esta etapa começa onde aquela termina: a resposta existe, e a
+pergunta agora é se ela diz o que o contexto sustenta.
+
+```bash
+python -m app.eval_ragas
+```
+
+O que muda em relação a tudo que veio antes: aqui as métricas **não são escritas por
+nós**. Faithfulness e response relevancy não são comparação de campo — são julgamentos
+que exigem um modelo lendo a resposta. Escrever isso à mão seria reinventar, pior, o que
+o Ragas já resolveu. Por isso a regra desta aula é: nada de métrica de RAG em Python
+puro.
+
+### Só os casos respondíveis
+
+Dos 37 casos, entram os **29 com `should_answer=true`**. Os outros 8 ficam de fora, e
+não por preguiça:
+
+| Família | Por que não entra |
+| --- | --- |
+| Recusa (`should_answer=false`) | Não há resposta para ser fiel a um contexto |
+| Clarificação (`should_clarify=true`) | Não há contexto: o pipeline parou antes de buscar |
+
+Medir faithfulness numa recusa correta daria zero — e puniria o sistema exatamente por
+ter acertado. Esses dois comportamentos são medidos pelos evaluators determinísticos da
+etapa anterior, e a divisão de trabalho é essa.
+
+### Os contextos, e por que eles não vazam
+
+O Ragas precisa do **texto** dos chunks que alimentaram a resposta, não dos ids. Esse
+conteúdo não existe em lugar nenhum da saída do pipeline — e é proposital: o
+`app/observability.py` documenta que prompts, contexto e conteúdo de chunk nunca entram
+na telemetria.
+
+A saída foi um canal separado, que a API não tem como acionar:
+
+```python
+def run_for_evaluation(self, question, use_rerank=True) -> EvaluationRun:
+    contexts: list[str] = []
+    result = self.run(question, use_rerank=use_rerank, on_context=contexts.extend)
+    return EvaluationRun(result=result, selected_contexts=contexts)
+```
+
+Os textos vão para um **callback que o chamador fornece**, no mesmo ponto em que os
+`chunk_id` são gravados no debug. Quem não passa callback não recebe nada. Como
+`selected_contexts` vive no `EvaluationRun` e não no `RagPipelineResult`, ele não tem
+como aparecer no `/chat`, nem no `debug=true`, nem nos spans, nem no log estruturado —
+não é disciplina de quem escreve, é o modelo de dados não ter o campo.
+
+### As três métricas
+
+| Métrica | O que pergunta | Precisa de referência? |
+| --- | --- | --- |
+| `faithfulness` | A resposta afirma só o que o contexto sustenta? | não |
+| `response_relevancy` | A resposta responde à pergunta que foi feita? | não |
+| `context_precision` | O contexto recuperado era relevante para a resposta? | não |
+
+**`context_recall` ficou de fora**, e vale entender por quê. Ela exige uma resposta de
+referência, e o dataset tem `required_terms` — fatos que a resposta precisa conter, como
+`1 hora` ou `financeiro@fcai.example.com`. Isso **não é** uma resposta de referência.
+Esticar uma lista de termos até virar um parágrafo seria inventar o gabarito que a
+própria evaluation deveria conferir. Os `required_terms` continuam sendo cobrados de
+forma determinística, fora do Ragas.
+
+### Falha antes do Ragas
+
+Um caso `should_answer=true` que volta com `has_answer=false` não tem o que ser
+pontuado: não existe resposta para julgar. Ele entra no relatório como
+`failed_before_ragas` e **fica fora das médias** — contá-lo como zero misturaria "a
+resposta estava ruim" com "não houve resposta", que são problemas diferentes e têm
+consertos diferentes.
+
+Pelo mesmo motivo o relatório separa três tipos de falha em vez de um:
+
+| Campo | O que significa | Consertar onde |
+| --- | --- | --- |
+| `failed_before_ragas` | O pipeline rodou e não produziu resposta | retrieval ou grounding |
+| `pipeline_errors` | O pipeline estourou naquele caso (timeout, 429) | infraestrutura, e o caso pode ser re-rodado |
+| `metric_errors` | A métrica falhou; o score fica `null` | a métrica, não o pipeline |
+
+Um erro de pipeline no vigésimo quinto caso não descarta os vinte e quatro anteriores:
+o caso é registrado e a rodada continua. Numa execução de seis minutos, isso é a
+diferença entre perder um caso e perder a tarde.
+
+### O relatório
+
+```
+Ragas Evaluation Summary
+
+Dataset cases: 37
+Answerable cases: 29
+Evaluated by Ragas: 3
+Failed before Ragas: 0
+Skipped: 8
+
+Faithfulness:       1.00
+Response relevancy: 0.90
+Context precision:  1.00
+
+Lowest scoring cases:
+- sla_p1_pro: response_relevancy=0.71
+
+Report: data/eval_runs/ragas_20260811T161509Z.json
+```
+
+O JSON completo fica em `data/eval_runs/`, com `run_id`, `created_at`, o modelo usado,
+o resumo e o resultado caso a caso. `data/` está no `.gitignore`: relatório de execução
+é resultado, não código.
+
+Repare que o relatório guarda `contexts_count`, e não os contextos. A regra de não
+espalhar conteúdo de chunk vale também para o arquivo local.
+
+### Flags
+
+```bash
+python -m app.eval_ragas --limit 5
+python -m app.eval_ragas --case-id sla_p1_enterprise
+python -m app.eval_ragas --no-rerank
+```
+
+`--no-rerank` serve para comparar à mão: se o `context_precision` sobe com rerank, o
+reranker está cumprindo o papel dele, que é justamente trocar recall por precisão.
+Comparação formal entre versões vem depois.
+
+### Custo, e dois avisos
+
+**Esta etapa gasta em dois lugares.** Cada caso roda o pipeline inteiro — planner,
+embedding, reranker e resposta — e depois cada métrica chama o modelo de novo para
+julgar. Com os 29 casos são mais de cem chamadas. Comece por `--limit 3`.
+
+**E ela gera traces.** O pipeline real é usado, então se `OBSERVABILITY_ENABLED=true` a
+rodada aparece no Langfuse como qualquer outra requisição. Não é o script chamando o
+Langfuse — é o pipeline se comportando normalmente. Para uma rodada limpa,
+`OBSERVABILITY_ENABLED=false python -m app.eval_ragas`.
+
+### Uma dependência que liga para casa
+
+Vale saber, e é um bom hábito checar em qualquer biblioteca nova: o Ragas envia um
+evento de uso para um endpoint próprio **depois de cada chamada de modelo**. E envia de
+forma síncrona, com `requests.post`, sem `try/except`, de dentro do código assíncrono
+que calcula as métricas.
+
+São dois problemas de uma vez. O `batch_score` só é rápido porque roda os casos em
+paralelo num event loop, e cada POST desses trava esse loop; numa rodada de 29 casos são
+mais de trezentos. Pior: como a chamada não tem tratamento de erro e o `asyncio.gather`
+do Ragas não usa `return_exceptions`, uma instabilidade de rede no endpoint de
+telemetria derruba o lote inteiro de uma métrica.
+
+Por isso a primeira linha executável do módulo é:
+
+```python
+os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
+```
+
+### O que esta etapa ainda não é
+
+Não há agente, não há tool calling, não há gate de CI, e o resultado ainda não vira
+experiment no Langfuse. Um `run_id` por execução em `data/eval_runs/` é o suficiente
+para comparar duas rodadas à mão — que é o passo antes de comparar de forma automática.
+
 ## Ferramentas de inspeção e comparação
 
 - `python -m app.retrieve "sua pergunta"` — só a busca vetorial, sem chamar o modelo de
@@ -891,6 +1054,7 @@ app/
   governance.py    # política de modelo e budget, e o ledger de uso estimado
   eval_dataset.py  # valida o dataset de evaluation e sincroniza com o Langfuse
   eval_components.py # avalia planner, retrieval e rerank, sem gerar resposta
+  eval_ragas.py    # avalia a resposta final contra o contexto usado, com Ragas
   rag_chat.py      # o chat no terminal
   api.py           # a API HTTP (FastAPI)
   retrieve.py      # busca isolada, sem modelo de chat

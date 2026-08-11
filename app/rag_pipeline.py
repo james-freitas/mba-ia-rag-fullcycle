@@ -1,8 +1,8 @@
 """Shared RAG pipeline: plan the query, retrieve, rerank and answer.
 
-One implementation used by both the terminal chat (app/rag_chat.py) and the
-HTTP API (app/api.py). The result is a plain data object: the callers decide
-how to present it.
+One implementation shared by the terminal chat (app/rag_chat.py), the HTTP API
+(app/api.py) and the evaluation scripts. The result is a plain data object: the
+callers decide how to present it.
 """
 
 import json
@@ -77,6 +77,10 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 PromptCallback = Callable[[str, PromptValue], None]
+
+# How the chunk texts leave the pipeline: handed to a callback the caller owns, and
+# never placed on the result. Only app/eval_ragas.py passes one — see run_for_evaluation.
+ContextCallback = Callable[[list[str]], None]
 
 # Which product surface these traces come from. Tenant and product are the ones the
 # application already enforces on every search.
@@ -172,6 +176,18 @@ class RagPipelineResult(BaseModel):
     needs_clarification: bool
     sources: list[Source]
     debug: RagDebug | None = None
+
+
+class EvaluationRun(BaseModel):
+    """A pipeline run plus the chunk texts that fed the answer.
+
+    Deliberately not part of RagPipelineResult: the contexts are chunk contents, and
+    those stay out of the API response, the debug payload, the spans and the run log.
+    Nothing but an evaluation script ever builds this.
+    """
+
+    result: RagPipelineResult
+    selected_contexts: list[str]
 
 
 def format_context(documents: list[Document]) -> str:
@@ -275,12 +291,25 @@ class RagPipeline:
         self.reranker = model.with_structured_output(RerankResult)
         self.answerer = model.with_structured_output(RagAnswer)
 
+    def run_for_evaluation(
+        self, question: str, use_rerank: bool = True
+    ) -> EvaluationRun:
+        """Same run as production, with the selected chunk texts handed back.
+
+        For evaluation scripts only: a metric like faithfulness has to read the very
+        context the answer was written from, and that context exists nowhere else.
+        """
+        contexts: list[str] = []
+        result = self.run(question, use_rerank=use_rerank, on_context=contexts.extend)
+        return EvaluationRun(result=result, selected_contexts=contexts)
+
     def run(
         self,
         question: str,
         use_rerank: bool = True,
         include_debug: bool = False,
         on_prompt: PromptCallback | None = None,
+        on_context: ContextCallback | None = None,
     ) -> RagPipelineResult:
         request_id = str(uuid4())
         timings = PipelineTimings()
@@ -313,7 +342,13 @@ class RagPipeline:
 
                 if decision.allowed:
                     result = self._execute(
-                        question, use_rerank, request_id, timings, config, on_prompt
+                        question,
+                        use_rerank,
+                        request_id,
+                        timings,
+                        config,
+                        on_prompt=on_prompt,
+                        on_context=on_context,
                     )
                 else:
                     result = self._blocked(request_id, decision, timings)
@@ -400,7 +435,9 @@ class RagPipeline:
         request_id: str,
         timings: PipelineTimings,
         config: dict,
+        *,
         on_prompt: PromptCallback | None,
+        on_context: ContextCallback | None,
     ) -> RagPipelineResult:
         planner_prompt = build_planner_prompt(question)
         if on_prompt:
@@ -475,6 +512,12 @@ class RagPipeline:
 
         if not documents:
             return self._no_answer(debug)
+
+        # The ids go on the debug payload; the texts go only to the caller that asked
+        # for them, which is never the API. Below the guard, so the callback fires on
+        # the one path where an answer really was built from these documents.
+        if on_context:
+            on_context([document.page_content for document in documents])
 
         answer_prompt = ANSWER_PROMPT.invoke(
             {"context": format_context(documents), "question": question}

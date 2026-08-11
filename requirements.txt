@@ -15,5 +15,11 @@ opentelemetry-api
 opentelemetry-sdk
 opentelemetry-exporter-otlp
 langfuse
+ragas
+# Pinned, and the only pin here: ragas 0.4.3 still imports ChatVertexAI from
+# langchain_community.chat_models.vertexai, a path langchain-community removed in
+# 0.4.2. Without this, importing ragas raises ModuleNotFoundError.
+# https://github.com/vibrantlabsai/ragas/issues/2745
+langchain-community==0.4.1
 pytest
 httpx
