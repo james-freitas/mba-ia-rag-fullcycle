@@ -1211,6 +1211,135 @@ Uma chamada de julgamento por caso, além da rodada completa do pipeline. É mai
 que o Ragas, que chama o modelo várias vezes por métrica — mas continua sendo custo real.
 Comece por `--limit 3`.
 
+## Langfuse experiments
+
+Todas as etapas anteriores respondem "isso está bom?". Esta responde a pergunta que
+antecede um deploy: **está melhor ou pior do que o que já está rodando?**
+
+Um número sozinho não diz isso. `28/29` é ótimo ou alarmante dependendo do que a rodada
+de ontem marcou — e a única forma de saber é guardar as duas, contra os mesmos casos, com
+os mesmos critérios. É isso que um experiment é, e é por isso que o resultado fica no
+Langfuse em vez de num terminal que rola para cima.
+
+```bash
+python -m app.eval_experiment --variant baseline    # com reranking
+python -m app.eval_experiment --variant no-rerank   # sem reranking
+```
+
+As duas variantes são o mesmo pipeline. **Nada nele muda** — `use_rerank` já era uma
+flag que ele aceitava. É de propósito: uma comparação só vale se houver exatamente uma
+diferença entre os lados.
+
+### Os quatro critérios
+
+Todos determinísticos, sem modelo julgando nada. Depois de três aulas medindo com LLM,
+a comparação entre versões volta ao que é barato e estável:
+
+| Score | Passa quando | Não se aplica quando |
+| --- | --- | --- |
+| `experiment_answer_shape` | os campos não se contradizem entre si | — |
+| `experiment_expected_behavior` | respondeu / esclareceu / recusou conforme o esperado | — |
+| `experiment_accepted_source_match` | citou alguma das fontes aceitas | `should_answer=false` |
+| `experiment_required_terms_match` | a resposta contém todos os `required_terms` | `should_answer=false` |
+
+O `answer_shape` merece um parágrafo, porque a primeira versão dele estava errada. Eu
+tinha escrito checagens de tipo — `answer` é string, `has_answer` é booleano — e elas
+**não podem falhar**: o `RagPipelineResult` é um modelo Pydantic, os tipos já são
+garantidos antes de qualquer evaluator rodar. Era uma métrica travada em 37/37 ocupando
+uma linha da tabela de comparação.
+
+O que o Pydantic **não** garante é a coerência entre os campos, e é isso que ele checa
+agora: resposta vazia, `has_answer` e `needs_clarification` verdadeiros ao mesmo tempo,
+fonte citada sem resposta, ou resposta afirmada sem fonte nenhuma. Esses estados são
+alcançáveis — o último acontece se o modelo declarar `has_answer=true` citando ids de
+chunk que não estavam no contexto.
+
+### O resultado
+
+```
+Experiment Comparison
+
+Metric                 baseline    candidate   diff
+Answer shape           37/37       37/37       +0
+Expected behavior      34/37       33/37       -1
+Accepted source match  28/29       27/29       -1
+Required terms match   26/29       24/29       -2
+Average latency        4527 ms     3509 ms     -1018 ms
+Total tokens           118222      68120       -50102
+Estimated cost         0.0204 USD  0.0122 USD  -0.0082 USD
+```
+
+**Esse é o formato de uma decisão de engenharia de verdade.** Tirar o reranking economiza
+42% dos tokens e 1 segundo por pergunta. E custa quatro regressões de qualidade.
+
+Nenhum dos dois lados é obviamente certo. Se o produto é um chat interno de baixo
+volume, um segundo a menos não paga duas respostas piores. Se são milhões de chamadas
+por dia, a conversa é outra. **O ponto não é que a ferramenta decide — é que agora existe
+o que discutir, em vez de opinião.**
+
+E repare em quem regrediu: `commercial_enterprise_preco_sob_consulta` aparece nas três
+métricas do candidato e em nenhuma do baseline. É exatamente o caso que o reranking
+estava salvando.
+
+### Como comparar
+
+Cada rodada salva um relatório em `data/eval_runs/`, e a comparação é local:
+
+```bash
+python -m app.eval_experiment --compare \
+  data/eval_runs/experiment_baseline_<timestamp>.json \
+  data/eval_runs/experiment_no-rerank_<timestamp>.json
+```
+
+Ela não sobe nada para o Langfuse — e não precisa, porque o Langfuse já tem as duas
+coisas. Além dos scores item a item, cada rodada grava os **agregados no próprio
+dataset run**, via `run_evaluators`:
+
+```python
+def experiment_run_summary(*, item_results, **kwargs) -> list[Evaluation]:
+    summary = summarize([case_report(result) for result in item_results])
+    ...
+```
+
+`experiment_expected_behavior_rate`, `experiment_average_latency_ms`,
+`experiment_total_tokens`, `experiment_estimated_cost_usd`. Sem isso, comparar duas
+rodadas separadas por semanas na interface seria impossível: os números que você
+compararia nunca teriam sido enviados. O `--compare` é o ciclo curto, para duas
+execuções que você acabou de fazer.
+
+**E ele se recusa a comparar o que não é comparável.** Um `--limit 5` diferenciado
+contra uma rodada completa produziria um `-32` convincente e sem sentido:
+
+```
+the runs cover different cases (Answer shape, Expected behavior, ... differ),
+so the diff would be meaningless: 6 vs 37 cases
+```
+
+Mesma checagem para datasets diferentes. É a mesma lição do `rubric_version` da aula do
+judge: a comparação precisa saber quando não deve ser feita.
+
+### Flags
+
+```bash
+python -m app.eval_experiment --variant baseline --limit 5
+python -m app.eval_experiment --variant baseline --case-id sla_p1_enterprise
+```
+
+### Isso ainda não é gate de CI
+
+Nada aqui reprova build nem bloqueia merge. O `--compare` imprime o diff e vai embora —
+quem decide se `-2` em `required_terms_match` é aceitável é uma pessoa.
+
+Transformar isso em portão automático exige uma conversa que a comparação sozinha não
+resolve: qual métrica trava o merge, qual só avisa, e quanta variação é ruído. Fica para
+a próxima etapa.
+
+### Custo
+
+Roda o pipeline inteiro uma vez por caso — os 37, incluindo recusas e ambíguos, porque a
+comparação precisa do dataset completo. Foram cerca de 118 mil tokens no baseline. É a
+etapa mais cara da série, e a única que você roda duas vezes de propósito.
+
 ## Ferramentas de inspeção e comparação
 
 - `python -m app.retrieve "sua pergunta"` — só a busca vetorial, sem chamar o modelo de
@@ -1254,6 +1383,7 @@ app/
   eval_components.py # avalia planner, retrieval e rerank, sem gerar resposta
   eval_ragas.py    # avalia a resposta final contra o contexto usado, com Ragas
   eval_judge.py    # julga a resposta final por uma rubrica, com structured output
+  eval_experiment.py # compara duas variantes do pipeline como experiment no Langfuse
   eval_runner.py   # roda o pipeline real sobre o dataset, para os dois acima
   rag_chat.py      # o chat no terminal
   api.py           # a API HTTP (FastAPI)
@@ -1262,7 +1392,7 @@ app/
   context_chat.py  # chat com um documento inteiro no prompt (comparação)
 knowledge_base/    # os documentos Markdown com front matter
 evals/             # o dataset de evaluation e as sondas de calibração do judge, em JSONL
-tests/             # contrato da API (com fake), dataset e relatório da evaluation
+tests/             # contrato da API (com fake), dataset e os relatórios das evaluations
 pytest.ini         # testpaths e pythonpath dos testes
 test.http          # requests prontos para a extensão REST Client
 docker-compose.yml

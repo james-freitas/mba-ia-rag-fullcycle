@@ -124,6 +124,20 @@ def connect_langfuse() -> Langfuse:
     return client
 
 
+def item_field(item, name: str):
+    # Langfuse hands a DatasetItem; a local run hands a plain dict built by build_item.
+    return item[name] if isinstance(item, dict) else getattr(item, name)
+
+
+def select_items(items: list, case_id: str | None, limit: int | None) -> list:
+    if case_id:
+        items = [item for item in items if item_field(item, "id") == case_id]
+        if not items:
+            raise DatasetError(f"case not found in the dataset: {case_id}")
+
+    return items[:limit] if limit else items
+
+
 def build_item(case: EvalCase) -> dict:
     return {
         # The case id is the item id, so syncing again updates the item instead of

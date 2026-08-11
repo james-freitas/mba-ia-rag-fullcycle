@@ -24,7 +24,9 @@ from app.eval_dataset import (
     DatasetError,
     build_item,
     connect_langfuse,
+    item_field,
     load_cases,
+    select_items,
 )
 from app.query_planner import (
     QueryPlan,
@@ -53,11 +55,6 @@ class ComponentEvalError(Exception):
 class CaseResult:
     case_id: str
     evaluations: list[Evaluation]
-
-
-def item_field(item, name: str):
-    # Langfuse hands the task a DatasetItem; the local run hands it a plain dict.
-    return item[name] if isinstance(item, dict) else getattr(item, name)
 
 
 def source_files(documents: list[Document]) -> list[str]:
@@ -261,15 +258,6 @@ def select_evaluators(use_rerank: bool) -> list:
         for evaluator in EVALUATORS
         if use_rerank or evaluator is not rerank_source_kept
     ]
-
-
-def select_items(items: list, case_id: str | None, limit: int | None) -> list:
-    if case_id:
-        items = [item for item in items if item_field(item, "id") == case_id]
-        if not items:
-            raise ComponentEvalError(f"case not found in the dataset: {case_id}")
-
-    return items[:limit] if limit else items
 
 
 def run_locally(items: list[dict], target, evaluators: list) -> list[CaseResult]:
