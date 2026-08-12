@@ -132,7 +132,7 @@ relatórios de evaluation (`tests/test_component_report.py`,
 ## Component evaluation
 
 ```bash
-RUN_COMPONENT_EVALS=true python -m app.eval_components
+python -m app.eval_components
 ```
 
 Roda **query planner, filtros, retrieval e reranking** contra o dataset, e para antes da
@@ -140,9 +140,8 @@ resposta. O motivo é diagnóstico: quando a resposta final sai errada, a pergun
 quebrou — e se o chunk certo nunca chegou ao prompt, avaliar a redação mede a
 consequência em vez da causa.
 
-A variável de ambiente é controle de custo, e é proposital que seja chata: `pytest`
-continua grátis; isto aqui é decisão consciente de gastar tokens. Não é a governança do
-pipeline — o script não passa pela allowlist nem pelo ledger.
+São duas chamadas de modelo por caso — planner e reranker. É a mais barata das camadas
+que custam, porque o modelo de resposta não entra. Use `--limit` para controlar o gasto.
 
 ### Os seis scores
 
@@ -193,10 +192,10 @@ infinitamente melhor que só saber que "o chat não respondeu".
 ### Flags
 
 ```bash
-RUN_COMPONENT_EVALS=true python -m app.eval_components --limit 5
-RUN_COMPONENT_EVALS=true python -m app.eval_components --case-id company_email_financeiro
-RUN_COMPONENT_EVALS=true python -m app.eval_components --no-rerank    # a métrica de rerank some do relatório
-RUN_COMPONENT_EVALS=true python -m app.eval_components --no-langfuse  # lê o JSONL local, não grava score
+python -m app.eval_components --limit 5
+python -m app.eval_components --case-id company_email_financeiro
+python -m app.eval_components --no-rerank    # a métrica de rerank some do relatório
+python -m app.eval_components --no-langfuse  # lê o JSONL local, não grava score
 ```
 
 `--no-langfuse` **não** é offline: continua chamando OpenAI e pgvector, só não escreve no

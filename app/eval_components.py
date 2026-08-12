@@ -10,7 +10,6 @@ answer graded as wrong is useless feedback when the chunk it needed never arrive
 """
 
 import argparse
-import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,7 +41,6 @@ from app.eval_runner import average, save_report
 from app.rerank import RerankResult, build_rerank_prompt, select_reranked_documents
 from app.retrieve import connect_store, ensure_collection_ready
 
-RUN_FLAG = "RUN_COMPONENT_EVALS"
 EXPERIMENT_NAME = "component-evaluation"
 EXPERIMENT_DESCRIPTION = (
     "Query planning, retrieval and reranking scored per component. "
@@ -374,13 +372,6 @@ def print_report(evaluators: list, results: list[CaseResult], requested: int) ->
         print("None.")
 
 
-def ensure_enabled() -> None:
-    if os.getenv(RUN_FLAG, "").lower() != "true":
-        raise ComponentEvalError(
-            f"{RUN_FLAG}=true is required because this evaluation calls LLMs."
-        )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Component evaluation for the RAG chat: planner, retrieval, rerank."
@@ -403,7 +394,6 @@ def main() -> None:
     use_rerank = not args.no_rerank
 
     try:
-        ensure_enabled()
         evaluators = select_evaluators(use_rerank)
 
         client = None
