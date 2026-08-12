@@ -109,6 +109,7 @@ caso aplicável, e o gate as reporta como `MISSING`.
 | [docs/evaluation.md](docs/evaluation.md) | as cinco camadas que avaliam a resposta |
 | [docs/agent.md](docs/agent.md) | o agente, suas ferramentas e a avaliação de trajetória |
 | [docs/quality-gates.md](docs/quality-gates.md) | thresholds e a decisão de CI |
+| [docs/security-threat-model.md](docs/security-threat-model.md) | threat model: assets, trust boundaries, riscos abertos |
 
 ## Estrutura
 
