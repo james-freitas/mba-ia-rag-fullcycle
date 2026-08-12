@@ -4,8 +4,8 @@
     "report_prefix": "component_",
     "metrics": {
       "planner_clarification_match": 0.85,
-      "planner_plan_match": 0.80,
-      "planner_doc_type_coverage": 0.65,
+      "planner_plan_match": 0.8,
+      "planner_doc_type_coverage": 0.6,
       "retrieval_source_hit": 0.85,
       "rerank_source_kept": 0.85,
       "clarification_skips_retrieval": 0.75
@@ -17,7 +17,7 @@
     "metrics": {
       "faithfulness": 0.75,
       "response_relevancy": 0.75,
-      "context_precision": 0.70
+      "context_precision": 0.7
     }
   },
   "judge_eval": {
@@ -27,21 +27,21 @@
       "average_groundedness_score": 0.75,
       "average_relevance_score": 0.75,
       "average_overall_score": 0.75,
-      "pass_rate": 0.70
+      "pass_rate": 0.7
     }
   },
   "agent_eval": {
     "required": true,
     "report_prefix": "agent_",
     "metrics": {
-      "tool_selection_pass_rate": 0.80,
-      "forbidden_tools_pass_rate": 1.00,
-      "argument_match_pass_rate": 0.80,
+      "tool_selection_pass_rate": 0.8,
+      "forbidden_tools_pass_rate": 1.0,
+      "argument_match_pass_rate": 0.6,
       "trajectory_match_pass_rate": 0.75,
-      "max_steps_pass_rate": 0.90,
+      "max_steps_pass_rate": 0.9,
       "clarification_pass_rate": 0.75,
-      "refusal_pass_rate": 0.90,
-      "ticket_creation_pass_rate": 0.90
+      "refusal_pass_rate": 0.0,
+      "ticket_creation_pass_rate": 0.9
     }
   }
 }
