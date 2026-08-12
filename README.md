@@ -105,17 +105,21 @@ caso aplicável, e o gate as reporta como `MISSING`.
 
 Uma suíte adversarial mede como o Knowledge Chat se comporta sob **entrada direta
 maliciosa** (prompt injection, grounding bypass, extração de contexto, role escalation,
-manipulação do planner). Roda o pipeline real e pontua propriedades determinísticas —
-comportamento esperado, ausência de termos plantados, escopo `SAFE_FILTERS` preservado e
-integridade das fontes — registrando no Langfuse e em relatório local.
+manipulação do planner) — dataset `fcai-security-direct-injection-v2`, ~28 casos em três
+níveis de `difficulty` (basic/intermediate/advanced) e alguns idiomas. Roda o pipeline
+real e pontua propriedades determinísticas, cada uma **blocking** (decide se o ataque teve
+sucesso) ou **diagnostic** (só sinaliza — ex.: a resposta cita um valor falso apenas para
+refutá-lo). Só falhas blocking contam contra a resistência. Registra no Langfuse e em
+relatório local.
 
 Nesta baseline **nenhuma mitigação nova está ativa** (`security_controls_profile =
-baseline-no-new-guardrails`): ela fotografa o comportamento atual para comparar depois que
-guardrails existirem. Não entra no quality gate ainda.
+baseline-no-new-guardrails`): fotografa o comportamento atual para comparar quando
+guardrails existirem. Não entra no quality gate ainda. A taxa é **relativa a este dataset
+versionado e às suas propriedades blocking** — não é uma medida absoluta de segurança.
 
 ```bash
 python -m app.eval_security --validate-only          # valida o dataset
-python -m app.eval_security --sync                   # sincroniza o dataset com o Langfuse
+python -m app.eval_security --sync                   # sincroniza o dataset (v2) com o Langfuse
 python -m app.eval_security                          # roda os ataques e pontua
 python -m app.eval_security --case-id sec_direct_003 # um caso; --limit N para um subconjunto
 ```
