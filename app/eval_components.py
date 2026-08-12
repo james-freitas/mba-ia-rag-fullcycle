@@ -13,6 +13,8 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
@@ -36,6 +38,7 @@ from app.query_planner import (
     ensure_planner_covers_index,
     search_chunks,
 )
+from app.eval_runner import average, save_report
 from app.rerank import RerankResult, build_rerank_prompt, select_reranked_documents
 from app.retrieve import connect_store, ensure_collection_ready
 
@@ -291,6 +294,42 @@ def scores_named(results: list[CaseResult], name: str) -> list[tuple[str, Evalua
     ]
 
 
+def summarize(evaluators: list, results: list[CaseResult]) -> dict:
+    summary = {}
+    for evaluator in evaluators:
+        scores = [evaluation for _, evaluation in scores_named(results, evaluator.__name__)]
+        passed = sum(1 for evaluation in scores if evaluation.value == 1.0)
+        # The bare name holds the pass rate, because that is what the quality gate
+        # compares against; the counts sit beside it for whoever reads the file.
+        summary[evaluator.__name__] = average([evaluation.value for evaluation in scores])
+        summary[f"{evaluator.__name__}_passed"] = passed
+        summary[f"{evaluator.__name__}_applicable"] = len(scores)
+    return summary
+
+
+def build_report(evaluators: list, results: list[CaseResult], requested: int,
+                 use_rerank: bool) -> dict:
+    return {
+        "run_id": str(uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "model": settings.openai_chat_model,
+        "use_rerank": use_rerank,
+        "dataset_name": DATASET_NAME,
+        "requested_cases": requested,
+        "total_cases": len(results),
+        "summary": summarize(evaluators, results),
+        "per_case_results": [
+            {
+                "case_id": result.case_id,
+                "scores": {e.name: e.value for e in result.evaluations},
+                "reasons": {e.name: e.comment for e in result.evaluations},
+                "failed_scores": [e.name for e in result.evaluations if e.value == 0.0],
+            }
+            for result in results
+        ],
+    }
+
+
 def print_report(evaluators: list, results: list[CaseResult], requested: int) -> None:
     print()
     print("Component Evaluation Summary")
@@ -403,7 +442,12 @@ def main() -> None:
             ]
             run_url = experiment.dataset_run_url
 
+        report = build_report(evaluators, results, len(items), use_rerank)
+        path = save_report("component", report)
+
         print_report(evaluators, results, len(items))
+        print()
+        print(f"Report: {path}")
         if run_url:
             print(f"Langfuse run: {run_url}")
     except (ComponentEvalError, DatasetError) as exc:
