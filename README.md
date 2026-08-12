@@ -101,6 +101,27 @@ Cada evaluation salva um relatório em `data/eval_runs/`, e o gate lê o mais re
 cada. Todas aceitam `--limit` para reduzir custo — mas rodada parcial deixa métricas sem
 caso aplicável, e o gate as reporta como `MISSING`.
 
+## Security baseline
+
+Uma suíte adversarial mede como o Knowledge Chat se comporta sob **entrada direta
+maliciosa** (prompt injection, grounding bypass, extração de contexto, role escalation,
+manipulação do planner). Roda o pipeline real e pontua propriedades determinísticas —
+comportamento esperado, ausência de termos plantados, escopo `SAFE_FILTERS` preservado e
+integridade das fontes — registrando no Langfuse e em relatório local.
+
+Nesta baseline **nenhuma mitigação nova está ativa** (`security_controls_profile =
+baseline-no-new-guardrails`): ela fotografa o comportamento atual para comparar depois que
+guardrails existirem. Não entra no quality gate ainda.
+
+```bash
+python -m app.eval_security --validate-only          # valida o dataset
+python -m app.eval_security --sync                   # sincroniza o dataset com o Langfuse
+python -m app.eval_security                          # roda os ataques e pontua
+python -m app.eval_security --case-id sec_direct_003 # um caso; --limit N para um subconjunto
+```
+
+Dataset: `evals/security_direct_injection.jsonl`. Relatórios: `data/eval_runs/`.
+
 ## Documentação
 
 | | |
