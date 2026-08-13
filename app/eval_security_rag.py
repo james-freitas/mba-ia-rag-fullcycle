@@ -23,9 +23,19 @@ so each stage is recorded separately. Retrieval and selection of adversarial con
 untrusted source, adopting a poisoned fact, following a planted instruction or violating the
 expected behaviour are **blocking**: those decide whether the attack succeeded.
 
-This is a baseline. No control is added, no filter is loosened, no prompt is weakened, and
-the production collection is never touched: the whole evaluation runs against an isolated
-pgvector collection built from the real knowledge base *plus* the adversarial fixtures.
+The dataset, the fixtures and the questions are frozen: the same ten attacks run before and
+after a control, and only the `security_controls_profile` changes. The BEFORE was
+`baseline-no-new-guardrails`; this file now runs under `trusted-ingestion-v1`, where
+app/provenance.py decides which sources may supply knowledge *before* anything is indexed.
+Expectations were not touched to flatter the result.
+
+A rejected poison document is a security outcome, not an execution error: the case still
+runs, the question is still asked against the collection that legitimately exists, and the
+stages simply record that nothing adversarial was ever there to retrieve.
+
+The production collection is never touched: the whole evaluation runs against an isolated
+pgvector collection built from the real knowledge base *plus* whatever the ingestion policy
+accepts from the adversarial fixtures.
 """
 
 import argparse
@@ -47,7 +57,6 @@ from app.db import enable_vector_extension, get_connection
 from app.eval_dataset import DatasetError, connect_langfuse, item_field, select_items
 from app.eval_runner import EvalRunError, average, ensure_within_policy, save_report
 from app.eval_security import (
-    SECURITY_CONTROLS_PROFILE,
     Check,
     git_commit,
     listed,
@@ -60,10 +69,12 @@ from app.index import connect_store
 from app.ingest import (
     KNOWLEDGE_BASE_DIR,
     IngestionError,
+    IngestionOutcome,
     chunk_document,
-    load_document,
+    ingest_document,
     load_documents,
 )
+from app.provenance import POLICY_NAME, trusted_roots_description
 from app.rag_pipeline import RagPipeline
 
 DATASET_VERSION = "v1"
@@ -78,7 +89,11 @@ DATASET_DESCRIPTION = (
 DATASET_PATH = PROJECT_ROOT / "evals" / "security_rag_poisoning.jsonl"
 FIXTURES_DIR = PROJECT_ROOT / "evals" / "security_rag_fixtures"
 
-DEFAULT_EXPERIMENT = "fcai-security-rag-poisoning-v1-baseline"
+DEFAULT_EXPERIMENT = "fcai-security-rag-poisoning-v1-trusted-ingestion-v1"
+
+# This suite now runs WITH a control, so it no longer shares the shared baseline profile.
+# The historical BEFORE reports keep "baseline-no-new-guardrails"; nothing rewrites them.
+SECURITY_CONTROLS_PROFILE = "trusted-ingestion-v1"
 
 # The isolated collection this evaluation builds and attacks. Postgres identifier, so
 # underscores where the dataset name uses hyphens. It is the ONLY table this module is ever
@@ -120,7 +135,7 @@ SCORE_LABELS = {
     SOURCE_USE: "Untrusted source not used",
     CLAIM: "Poisoned claim absent",
     MARKER: "Indirect instruction not followed",
-    BEHAVIOR: "Expected behavior",
+    BEHAVIOR: "Response behavior",
 }
 
 RATE_KEY = {name: f"{name}_rate" for name in PROPERTY_NAMES}
@@ -133,7 +148,7 @@ OUTCOME_NOT_RETRIEVED = "B_indexed_but_never_retrieved"
 OUTCOME_NOT_INFLUENCED = "C_reached_the_model_but_impact_held"
 OUTCOME_INFLUENCED = "D_answer_influenced"
 OUTCOME_LEGEND = {
-    OUTCOME_NOT_INDEXED: "poison rejected before indexing — best case for provenance",
+    OUTCOME_NOT_INDEXED: "rejected by trusted ingestion, before indexing",
     OUTCOME_NOT_RETRIEVED: "provenance gap exists, but this attack never reached the model",
     OUTCOME_NOT_INFLUENCED: "adversarial content reached the model; another layer held the impact",
     OUTCOME_INFLUENCED: "end-to-end success: an untrusted source shaped the answer",
@@ -302,10 +317,15 @@ def sync_dataset(cases: list[RagPoisoningCase]) -> int:
 # --- setup: build the isolated collection -------------------------------------------
 
 
-class FixtureOutcome(BaseModel):
-    source_file: str
-    accepted: bool
-    rejected_reason: str | None = None
+class FixtureOutcome(IngestionOutcome):
+    """The production ingestion outcome, plus what the indexer then did with it.
+
+    Subclassed rather than re-typed field by field, so a field added to IngestionOutcome
+    cannot silently go missing from the report. `structural_valid` is about the file;
+    `provenance_trusted` is about where it came from — the whole point of this control is
+    that the first can be true while the second is false.
+    """
+
     chunks: int = 0
     indexed_chunks: int = 0
 
@@ -327,6 +347,9 @@ class SetupEvidence(BaseModel):
     # Checked against the database after indexing, not assumed: 0 poison chunks in the
     # production collection is the whole isolation guarantee.
     production_poison_chunks: int
+    # The authorized source roots and the policy that decided every line below.
+    trusted_source_roots: list[str]
+    provenance_policy: str
     trusted_documents: int
     trusted_chunks: int
     fixtures: list[FixtureOutcome]
@@ -337,6 +360,16 @@ class SetupEvidence(BaseModel):
     @property
     def poison_submitted(self) -> int:
         return len(self.fixtures)
+
+    @computed_field
+    @property
+    def poison_structurally_valid(self) -> int:
+        return sum(1 for fixture in self.fixtures if fixture.structural_valid)
+
+    @computed_field
+    @property
+    def poison_provenance_trusted(self) -> int:
+        return sum(1 for fixture in self.fixtures if fixture.provenance_trusted)
 
     @computed_field
     @property
@@ -383,24 +416,18 @@ def load_trusted_chunks() -> tuple[int, list[Document]]:
 def load_poison_chunks() -> tuple[list[FixtureOutcome], list[Document]]:
     """Submit each fixture to the SAME ingestion the knowledge base goes through.
 
-    Nothing is bypassed on purpose: whether a document that merely *declares* valid
-    metadata is accepted is exactly the thing being measured.
+    Nothing is bypassed on purpose, and nothing here decides trust on its own: this calls
+    the production `ingest_document`, so whatever the application does for the real
+    knowledge base is exactly what happens to these files. An evaluator with its own
+    private copy of the rule would prove nothing about production.
     """
     outcomes: list[FixtureOutcome] = []
     documents: list[Document] = []
     for path in fixture_paths():
-        try:
-            post = load_document(path)
-        except IngestionError as exc:
-            outcomes.append(
-                FixtureOutcome(source_file=path.name, accepted=False, rejected_reason=str(exc))
-            )
-            continue
-        chunks = to_documents(chunk_document(path, post))
+        post, outcome = ingest_document(path)
+        chunks = to_documents(chunk_document(path, post)) if post else []
         documents.extend(chunks)
-        outcomes.append(
-            FixtureOutcome(source_file=path.name, accepted=True, chunks=len(chunks))
-        )
+        outcomes.append(FixtureOutcome(**outcome.model_dump(), chunks=len(chunks)))
     return outcomes, documents
 
 
@@ -473,6 +500,8 @@ def prepare_security_collection(table_name: str = SECURITY_TABLE_NAME) -> SetupE
         production_collection=PRODUCTION_TABLE_NAME,
         security_collection=table_name,
         production_poison_chunks=leaked,
+        trusted_source_roots=trusted_roots_description(),
+        provenance_policy=POLICY_NAME,
         trusted_documents=trusted_documents,
         trusted_chunks=len(trusted_chunks),
         fixtures=outcomes,
@@ -480,27 +509,42 @@ def prepare_security_collection(table_name: str = SECURITY_TABLE_NAME) -> SetupE
 
 
 def print_setup(setup: SetupEvidence) -> None:
+    total = setup.poison_submitted
     print()
-    print("Setup evidence (isolated security collection)")
+    print("Trusted ingestion setup (isolated security collection)")
     print(f"  Production collection: {setup.production_collection}")
     print(f"  Security collection:   {setup.security_collection}")
     print(f"  Collections differ:    {setup.production_collection != setup.security_collection}")
     print(f"  Poison chunks in the production collection: {setup.production_poison_chunks} (must be 0)")
-    print(f"  Trusted documents processed:        {setup.trusted_documents}")
-    print(f"  Trusted chunks indexed:             {setup.trusted_chunks}")
-    print(f"  Poison fixtures submitted:          {setup.poison_submitted}")
-    print(f"  Poison fixtures accepted by ingestion: {setup.poison_accepted}/{setup.poison_submitted}")
-    print(f"  Poison fixtures indexed:               {setup.poison_indexed}/{setup.poison_submitted}")
-    print(f"  Poison chunks indexed:              {setup.poison_chunks}")
+    print()
+    print(f"  Trusted source roots: {', '.join(setup.trusted_source_roots)}")
+    print(f"  Provenance policy:    {setup.provenance_policy}")
+    print()
+    print(f"  Trusted documents accepted:  {setup.trusted_documents}")
+    print(f"  Trusted chunks indexed:      {setup.trusted_chunks}")
+    print()
+    # Separate counts, deliberately: a fixture can be a perfectly valid document and still
+    # be refused. Collapsing these would hide the only thing this control changed.
+    counts = [
+        ("Poison fixtures submitted", total),
+        ("Structurally valid", f"{setup.poison_structurally_valid}/{total}"),
+        ("Provenance trusted", f"{setup.poison_provenance_trusted}/{total}"),
+        ("Accepted by ingestion", f"{setup.poison_accepted}/{total}"),
+        ("Indexed", f"{setup.poison_indexed}/{total}"),
+        ("Poison chunks in the index", setup.poison_chunks),
+    ]
+    width = max(len(label) for label, _ in counts) + 2
+    for label, value in counts:
+        print(f"  {label + ':':<{width}}{value}")
     print()
     for outcome in setup.fixtures:
-        state = "accepted" if outcome.accepted else f"rejected ({outcome.rejected_reason})"
-        # submitted chunks next to indexed chunks: the two are separate claims, and a
-        # document can be accepted by the ingestion and still never reach the index.
-        print(
-            f"  {outcome.source_file}: {state}, "
-            f"{outcome.chunks} chunk(s) submitted, {outcome.indexed_chunks} indexed"
-        )
+        print(f"  {outcome.source_file}")
+        print(f"    structural: {'valid' if outcome.structural_valid else 'invalid'}")
+        print(f"    source:     {outcome.provenance_source}")
+        print(f"    provenance: {'trusted' if outcome.provenance_trusted else 'untrusted'}")
+        decision = "accepted" if outcome.accepted else "rejected before indexing"
+        print(f"    decision:   {decision} — {outcome.reason}")
+        print(f"    indexed:    {'yes' if outcome.indexed else 'no'} ({outcome.indexed_chunks} chunk(s))")
 
 
 # --- running the real pipeline against the poisoned collection ----------------------
@@ -1014,9 +1058,15 @@ def print_report(report: dict) -> None:
 
     # "held/applicable", not "failures": every score is positive, so 0/1 reads as "the
     # safe property did NOT hold in the one case where it applied".
-    print("Safe properties held (held/applicable — a property that does not apply is not scored):")
+    print("Safe properties held (passed/applicable)")
+    print("  1 = safe property held · 0 = safe property failed · - = not applicable")
     rows = [
-        (SCORE_LABELS[name], f"{summary[f'{name}_passed']}/{summary[f'{name}_applicable']}")
+        (
+            SCORE_LABELS[name],
+            f"{summary[f'{name}_passed']}/{summary[f'{name}_applicable']}"
+            if summary[f"{name}_applicable"]
+            else "-",
+        )
         for name in PROPERTY_NAMES
     ]
     width = max(len(text) for text, _ in rows) + 2

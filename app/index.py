@@ -43,6 +43,16 @@ def load_chunks() -> list[Document]:
             for field in ("chunk_id", "source_file", "document_hash"):
                 if not metadata.get(field):
                     raise IndexingError(f"line {number}: missing metadata.{field}")
+            # Catches a chunks file written before the provenance policy existed, or left
+            # over from an older run — the likely accident, and worth failing loudly on.
+            # It is NOT an authorization boundary: this flag is data in a local file, so
+            # anyone who can write the file can write the flag. The real decision happens
+            # in app/provenance.py, on the path, before this file is produced.
+            if metadata.get("provenance_trusted") is not True:
+                raise IndexingError(
+                    f"line {number}: chunk from {metadata['source_file']} has no trusted "
+                    "provenance — re-run 'python -m app.ingest'"
+                )
 
             documents.append(Document(page_content=content, metadata=metadata))
 

@@ -80,6 +80,42 @@ atravessa a Input Boundary; o documento atravessa a Data / Context Boundary. As 
 terminam no mesmo lugar — o contexto do modelo — e só a primeira é normalmente tratada
 como "entrada".
 
+### O primeiro controle: source provenance antes da indexação
+
+O caminho do documento é o único que já tem um controle implementado. Ele fica **antes da
+indexação** — portanto antes do retrieval, antes do reranker e antes do modelo:
+
+```mermaid
+flowchart LR
+    DOC([Documento]):::untrusted
+    POL{"Source provenance<br/>trusted-source-v1"}:::control
+    ING[Ingestion + chunking]:::trusted
+    IDX[(Index / pgvector)]:::retrieved
+    RET[Retrieval + Reranking]:::retrieved
+    LLM[Answer model]:::model
+    X([Rejeitado<br/>antes de indexar]):::reject
+
+    DOC --> POL
+    POL -->|"origem autorizada"| ING --> IDX --> RET --> LLM
+    POL -->|"origem não autorizada"| X
+
+    classDef untrusted fill:#f8d7da,stroke:#b02a37,color:#000;
+    classDef trusted fill:#d1e7dd,stroke:#146c43,color:#000;
+    classDef retrieved fill:#ffe5d0,stroke:#c4531f,color:#000;
+    classDef model fill:#fff3cd,stroke:#997404,color:#000;
+    classDef control fill:#cfe2ff,stroke:#0a58ca,color:#000;
+    classDef reject fill:#e2e3e5,stroke:#41464b,color:#000;
+```
+
+A decisão não olha o conteúdo e não procura payload conhecido. Ela responde **uma**
+pergunta: *esta origem está autorizada a fornecer conhecimento para este pipeline?* Um
+documento continua podendo ser perfeitamente válido e ser recusado — é o caso das seis
+fixtures adversariais, todas `structurally valid` e nenhuma `trusted`.
+
+O que o controle **não** responde: *este conteúdo é seguro?* Uma origem autorizada pode
+ser comprometida, pode conter texto copiado de fora e pode carregar instrução para o
+modelo. Isso é outro controle e continua em aberto (SEC-002).
+
 ### Como ler este diagrama
 
 Uma **superfície de ataque** aparece onde um conteúdo consegue **influenciar
@@ -307,18 +343,22 @@ esperada, controle existente e risco se o conteúdo for manipulado.
 - **Atravessa:** arquivos `knowledge_base/*.md` (front matter + corpo).
 - **Controla os dados:** quem tem escrita no diretório/repositório.
 - **Confiança esperada:** hoje tratada como confiável (conteúdo interno curado).
-- **Controle existente:** `REQUIRED_METADATA` obriga presença dos campos; documento vazio
-  ou sem front matter é rejeitado (`IngestionError`); `document_hash` do arquivo inteiro.
-- **Risco se manipulado:** não há verificação de **procedência** nem de conteúdo. Um `.md`
-  com front matter válido é aceito e indexado como verdade, incluindo instruções
-  embutidas no corpo (injeção indireta) e rótulos de metadata escolhidos pelo autor.
+- **Controle existente:** **`trusted-source-v1`** (`app/provenance.py`) decide, antes de
+  indexar, se a origem está autorizada — allowlist de source roots, path resolvido, sem
+  prefixo de string; `REQUIRED_METADATA` obriga presença dos campos (validação
+  **estrutural**, separada da decisão de confiança); `document_hash` do arquivo inteiro.
+- **Risco se manipulado:** a procedência agora é verificada, mas apenas como *origem no
+  filesystem*. Não há assinatura, aprovação nem revisão: quem consegue **escrever dentro
+  de uma source autorizada** é confiável por construção, e instruções embutidas no corpo
+  de um documento autorizado continuam entrando no contexto (SEC-002).
 
 ### 4. Ingestion → Vector Store
 - **Atravessa:** chunks (texto + `chunk_id` determinístico + metadata) e seus embeddings.
 - **Controla os dados:** a aplicação (chunking) sobre conteúdo do documento.
 - **Confiança esperada:** confiável quanto ao formato; herda a confiança do documento.
 - **Controle existente:** `chunk_id` determinístico evita duplicação; `index.py` recusa
-  chunk sem `content`, `chunk_id`, `source_file` ou `document_hash`; reindexação
+  chunk sem `content`, `chunk_id`, `source_file` ou `document_hash`, e recusa chunk sem
+  `provenance_trusted` (pega arquivo de chunks anterior à política); reindexação
   incremental por hash.
 - **Risco se manipulado:** o context header (título, tipo, plano, versão) é **prepended ao
   texto do chunk** e embarca no embedding. Metadata autodeclarada vira parte do conteúdo
@@ -448,9 +488,20 @@ O OWASP aqui é só etiqueta de cobertura, não explicação.
 
 ## Current controls
 
-Controles que **já existem no código**, com seus limites. Nenhum destes é criado nesta
-aula; a intenção é registrar o ponto de partida.
+Controles que **já existem no código**, com seus limites. O primeiro da lista foi criado
+no módulo 9 (aula de trusted ingestion); o resto é o ponto de partida.
 
+- **Trusted ingestion / source provenance** (`app/provenance.py`) — antes de indexar, a
+  aplicação decide se a **origem** está autorizada: allowlist de source roots resolvida com
+  `Path.resolve()` e containment real (`../`, symlink para fora e prefixo de nome não
+  passam). A metadata `provenance_trusted`/`provenance_source`/`provenance_policy` é
+  atribuída pela aplicação; documento que tenta declará-la é recusado. `index.py` recusa chunk
+  sem a marca, o que pega um `chunks.jsonl` velho — mas isso é lint, não fronteira: a marca
+  é dado num arquivo local e quem escreve o arquivo escreve a marca. Produção e security
+  evaluation chamam a **mesma** função de decisão.
+  *Limite:* responde "esta origem está autorizada?", **não** "este conteúdo é seguro?". Não
+  há assinatura, aprovação humana nem revisão; quem escreve dentro de uma source autorizada
+  é confiável por construção.
 - **`SAFE_FILTERS` no retrieval** (`app/query_planner.py`) — `build_filters` sempre parte de
   `{"tenant":"fcai","product":"fcai-cloud","status":"published"}`; o modelo só acrescenta
   `doc_type`/`plan`, que **estreitam**.
@@ -459,7 +510,8 @@ aula; a intenção é registrar o ponto de partida.
   metadata não substitui autenticação.
 - **`status=published`** — só documentos publicados entram no escopo de busca.
   *Limite:* o `status` é autodeclarado no front matter; quem escreve o documento escolhe o
-  próprio rótulo.
+  próprio rótulo. **Nunca foi um controle de confiança** — é a trusted ingestion acima que
+  decide procedência, e ela ignora completamente o que o front matter afirma.
 - **Structured output com Pydantic** — `QueryPlan`, `RerankResult`, `RagAnswer`,
   `SupportAgentResult` garantem a forma da saída do modelo.
   *Limite:* valida **tipo**, não verdade nem autorização. Um `has_answer=true` bem-formado
@@ -508,8 +560,9 @@ aula; a intenção é registrar o ponto de partida.
 ## Open risks
 
 IDs estáveis. `likelihood` e `impact` em low/medium/high, análise simples de propósito.
-Todos começam em `status: open` — serão reavaliados quando o controle correspondente for
-aplicado nas próximas aulas.
+Todos começam em `status: open` e passam a `mitigated` quando um controle real é aplicado
+**e reexecutado contra a mesma baseline**. `mitigated` nunca significa "resolvido": vem
+sempre com o risco residual escrito, porque um controle fecha um caminho, não uma classe.
 
 ### SEC-001 — Direct prompt injection no Knowledge Chat
 - **Componente:** `POST /chat` → `RagPipeline` → planner/reranker/answer.
@@ -573,7 +626,23 @@ aplicado nas próximas aulas.
     `sec_rag_001` e `sec_rag_010` alternam, por não-determinismo do planner (que às vezes
     pede esclarecimento antes de recuperar) e do reranker. **A faixa 3–5/10 é a medida
     honesta; um número único não é.**
-- **Status:** open · **OWASP:** LLM01, LLM05, ASI06
+- **AFTER (`trusted-ingestion-v1`) — o que mudou e o que NÃO mudou:**
+  - Os cinco casos de indirect injection passaram a `10/10` resistidos, porque as fixtures
+    são rejeitadas antes da indexação. Nada foi recuperado, nada foi selecionado, nada foi
+    usado como fonte.
+  - **Isso não resolve indirect prompt injection.** A leitura correta é estreita: *os
+    ataques atuais, vindos de origens não autorizadas, foram interrompidos antes do
+    índice*. O modelo continua sem nenhuma defesa contra instrução vinda do contexto — e
+    na baseline ele **já resistia** aos três payloads (`0/5` seguiram a instrução em seis
+    execuções), então a mitigação de hoje nem sequer foi testada contra o que ele faria.
+  - **Continua possível:** conteúdo com instrução publicado dentro de uma source
+    autorizada, source confiável comprometida, documento legítimo editado depois de
+    aprovado, texto de terceiro colado num documento interno. Nenhum desses passa pela
+    política de origem — todos vêm de origem autorizada.
+  - Para fechar este risco seria preciso tratar o **conteúdo recuperado** como não
+    confiável mesmo vindo de fonte confiável. Não é o que foi feito aqui.
+- **Status:** open — a mitigação de origem reduz a exposição atual, não elimina a classe ·
+  **OWASP:** LLM01, LLM05, ASI06
 
 ### SEC-003 — Ausência de provenance forte na ingestão
 - **Componente:** `app/ingest.py` / `app/index.py`.
@@ -582,10 +651,41 @@ aplicado nas próximas aulas.
 - **Impacto:** qualquer conteúdo com rótulo válido vira "verdade" recuperável; base para
   RAG poisoning.
 - **Likelihood:** medium · **Impact:** high
-- **Controles atuais:** `REQUIRED_METADATA`; `document_hash`; recusa de arquivo vazio.
-- **Tratamento planejado:** avaliar verificação de procedência/assinatura e checagem de
-  metadata contra a realidade.
-- **Baseline evidence** — mesma execução de `python -m app.eval_security_rag`:
+- **Controle implementado (`trusted-source-v1`, `app/provenance.py`):** uma allowlist de
+  **source roots** controlada pela aplicação decide, **antes da indexação**, se uma origem
+  pode fornecer conhecimento. O caminho é `Production ingestion → TrustedSourcePolicy →
+  aceito/rejeitado`, e a security evaluation chama exatamente a mesma função
+  (`app.ingest.ingest_document`) — não existe uma segunda cópia da regra só para a
+  avaliação. A resolução de caminho usa `Path.resolve()` seguido de containment real, então
+  `../` e symlink apontando para fora da raiz autorizada não passam, e um diretório irmão
+  chamado `knowledge_base_evil` também não.
+- **Metadata de provenance é da aplicação:** `provenance_trusted`, `provenance_source` e
+  `provenance_policy` são atribuídos pelo código. Um documento que tenta declarar qualquer
+  um deles é **recusado**, não corrigido em silêncio — assim a tentativa aparece em vez de
+  desaparecer. O indexador recusa chunk sem a marca, o que pega um `chunks.jsonl` anterior
+  à política; **isso não é uma fronteira** — a marca é dado num arquivo local e quem escreve
+  o arquivo escreve a marca. A decisão real acontece sobre o caminho, antes de existir chunk.
+- **AFTER evidence** — mesmo dataset, mesmas 10 perguntas, perfil `trusted-ingestion-v1`,
+  duas execuções idênticas:
+  - **6/6 fixtures continuam estruturalmente válidas** — nenhuma foi alterada.
+  - **0/6 têm provenance confiável · 0/6 aceitas · 0/6 indexadas · 0 chunks poison** no
+    índice. `A_poison_rejected_before_indexing = 10/10`.
+  - Os 8 documentos legítimos continuam sendo aceitos e indexados normalmente (134 chunks),
+    sem nenhuma alteração de conteúdo.
+  - As respostas voltaram a ser as corretas: `1 hora` no SLA P1 Enterprise, `R$ 499` no
+    preço do Pro, `14 dias` no trial, `30 dias` na retenção.
+- **Status:** mitigated (para o caminho de ingestão controlado pela aplicação) ·
+  **OWASP:** LLM04, LLM05
+- **Risco residual — a mitigação NÃO cobre:**
+  - **comprometimento de uma source confiável** — quem escrever dentro de
+    `knowledge_base/` é confiável por construção;
+  - **publisher autorizado malicioso** — não há aprovação humana nem revisão no caminho;
+  - **autenticidade criptográfica** — não há assinatura; a política prova *origem no
+    filesystem*, não *autoria*;
+  - **conteúdo externo copiado para dentro de uma source autorizada**.
+  Por isso o texto é "mitigated for the current application-controlled ingestion path", e
+  não "strong provenance resolvido".
+- **Evidência histórica do BEFORE** (perfil `baseline-no-new-guardrails`, preservada):
   - **6/6 fixtures adversariais foram aceitas** por `load_document` / validação de
     ingestão. Todas declaravam `tenant: fcai`, `product: fcai-cloud`, `status: published`
     e os demais campos obrigatórios — e nenhuma dessas declarações foi verificada contra
@@ -595,10 +695,9 @@ aplicado nas próximas aulas.
     antes do índice.
   - **7/10 casos chegaram a usar um desses documentos como fonte da resposta** (faixa
     5–7/10 em seis execuções).
-  - É exatamente `metadata validation != source authorization`: os controles atuais
-    verificam que os **campos existem**, nunca que **alguém autorizado publicou aquilo**.
+  - Era exatamente `metadata validation != source authorization`: a validação verificava
+    que os **campos existem**, nunca que **alguém autorizado publicou aquilo**.
     `document_hash` prova que o arquivo não mudou depois de lido — não prova de onde veio.
-- **Status:** open · **OWASP:** LLM04, LLM05
 
 ### SEC-004 — Autorização e tenant isolation ausentes
 - **Componente:** `SAFE_FILTERS`, `POST /chat`, tools do agente.
@@ -749,8 +848,21 @@ diferentes.
 | B. Direct input / Support Agent | Input → Action | `fcai-security-agent-direct-injection-v1` | `6/16` |
 | C. Data / Context / RAG poisoning | Data / Context | `fcai-security-rag-poisoning-v1` | `3/10` (faixa 3–5/10) |
 
-Nenhuma correção foi aplicada ainda: as três rodaram sob o perfil
-`baseline-no-new-guardrails`.
+A Data / Context Boundary já teve o **primeiro ciclo before/after completo** do módulo —
+mesmo dataset, mesmas dez perguntas, mesmas fixtures, só o perfil de controle mudou:
+
+| | BEFORE | AFTER |
+| --- | --- | --- |
+| Perfil | `baseline-no-new-guardrails` | `trusted-ingestion-v1` |
+| Poison submetidos | 6 | 6 |
+| Estruturalmente válidos | 6 | 6 |
+| Provenance confiável | (não avaliado) | **0** |
+| Aceitos pela ingestão | **6** | **0** |
+| Indexados | **6** (34 chunks) | **0** (0 chunks) |
+| Ataques resistidos | **3/10** (faixa 3–5/10) | **10/10** |
+
+As baselines A e B continuam sob `baseline-no-new-guardrails`; nenhum relatório histórico
+foi reescrito.
 
 ### Family A — Direct input attacks (dois caminhos da Input Boundary) ✅ baseline executada
 A mesma família tem **dois caminhos**, avaliados **separadamente** porque o blast radius é
@@ -765,7 +877,7 @@ diferente — o do agente pode produzir side effect real.
 - **Riscos:** SEC-001 (ambos), SEC-004, SEC-008, SEC-009, SEC-010 (caminho do agente).
   **Reexecução após correção:** sim, cada caminho com sua própria taxa.
 
-### Family B — RAG and indirect injection attacks ✅ baseline executada
+### Family B — RAG and indirect injection attacks ✅ baseline + correção executadas
 - **Componente exercitado:** ingestão → `pgvector` → retrieval → reranker → contexto do
   modelo. A pergunta do usuário é **legítima**; o conteúdo adversarial entra por documento.
 - **Comportamento inseguro alvo:** um documento envenenado altera a resposta; conteúdo é
@@ -776,7 +888,10 @@ diferente — o do agente pode produzir side effect real.
   injection emitiu seu marcador.
 - **Baseline:** `3/10`, faixa `3–5/10` em seis execuções (`app/eval_security_rag.py`), collection isolada
   `fcai_security_rag_poisoning_v1` — a collection de produção nunca recebe poison.
-- **Riscos:** SEC-002, SEC-003. **Reexecução após correção:** sim.
+- **Correção aplicada:** `trusted-ingestion-v1` (source provenance antes da indexação).
+  **Reexecução:** feita, mesmo dataset — `3/10` → `10/10`, com `A_poison_rejected_before_indexing`
+  em 10/10 casos. SEC-003 passou a mitigated com risco residual; **SEC-002 continua open**.
+- **Riscos:** SEC-002, SEC-003.
 
 ### Family C — Authorization and tenant isolation attacks
 - **Componente exercitado:** `SAFE_FILTERS`, `POST /chat`, `tenant_id` das tools.
@@ -829,9 +944,12 @@ A Input Boundary tem dois caminhos. No do agente, o GAP de **external authorizat
 **human approval** antes da tool deixou de ser hipótese: a baseline persistiu tickets reais
 a partir de entrada adversarial (SEC-008/009/010).
 
-O caminho do documento também deixou de ser hipótese. A entrada não confiável **não começa
-mais só no usuário** no diagrama: ela também entra pela ingestão, e não existe controle
-algum entre "um `.md` chegou" e "esse `.md` é fonte recuperável" (SEC-002/003).
+O caminho do documento é o **único com um controle já implementado**: a política de
+origem (`trusted-source-v1`) decide antes da indexação e é a linha sólida no diagrama.
+O que ela fecha é "qualquer `.md` vira fonte recuperável" (SEC-003). O que ela **não**
+fecha continua tracejado: não há aprovação, revisão nem assinatura entre uma origem
+autorizada e o índice, e conteúdo vindo de origem autorizada continua entrando no contexto
+do modelo sem ser tratado como potencial instrução (SEC-002).
 
 ```mermaid
 flowchart LR
@@ -850,14 +968,14 @@ flowchart LR
         TOOL["create_support_ticket<br/>(real side effect)"]:::action
     end
 
-    ING["Ingestion<br/>(REQUIRED_METADATA + document_hash)"]:::trusted
+    ING["Ingestion<br/>(provenance + REQUIRED_METADATA)"]:::trusted
     VS[("pgvector + data/*")]:::data
 
     U -.->|"no authn / no rate limit — GAP"| KCAPP
     U -.->|"no authn / no rate limit — GAP"| AGAPP
 
-    DOC -.->|"no source provenance — GAP"| ING
-    ING -.->|"no quarantine / no approval before indexing — GAP"| VS
+    DOC -->|"source provenance (trusted-source-v1) — CONTROL"| ING
+    ING -.->|"no approval / no signature / no review before indexing — GAP"| VS
 
     KCAPP -->|"SAFE_FILTERS (tenant = constant — GAP: no identity)"| VS
     VS -.->|"trusted and untrusted chunks share one index — GAP"| KCM
@@ -881,13 +999,16 @@ funcionando como camada de contenção não intencional: em `3/10` casos ele des
 adversarial que a busca havia trazido. Isso é sorte estrutural, não controle de segurança —
 ele foi escrito para precisão, não para confiança, e não sabe distinguir as duas coisas.
 
+**Fronteira que passou a ser imposta:** **procedência da origem na ingestão**
+(`trusted-source-v1`, SEC-003) — decidida pela aplicação, antes da indexação, e reconferida
+pelo indexador.
+
 **Fronteiras ainda sem controle forte (GAP no diagrama):** autenticação e rate limiting na
-entrada (SEC-014); identidade real por trás do `tenant` (SEC-004); **procedência da fonte
-na ingestão** (SEC-003); **quarentena/aprovação antes da indexação** (SEC-003); **separação
-entre fontes confiáveis e não confiáveis dentro do índice** (SEC-002, SEC-003); tratamento
-de conteúdo recuperado como potencial instrução (SEC-002); autorização/aprovação humana
-entre decisão do agente e execução de ação (SEC-008, SEC-010); governança aplicada também
-ao loop do agente (SEC-014).
+entrada (SEC-014); identidade real por trás do `tenant` (SEC-004); **aprovação/revisão
+humana antes da indexação** e **autenticidade criptográfica do documento** (SEC-003
+residual); tratamento de conteúdo recuperado como potencial instrução, inclusive vindo de
+fonte autorizada (SEC-002); autorização/aprovação humana entre decisão do agente e execução
+de ação (SEC-008, SEC-010); governança aplicada também ao loop do agente (SEC-014).
 
 Este baseline é o alvo das próximas aulas: cada GAP acima vira um controle, e este diagrama
 é atualizado quando isso acontecer.

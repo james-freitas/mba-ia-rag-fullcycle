@@ -31,6 +31,25 @@ uvicorn app.api:app --reload              # a API HTTP
 python -m app.support_agent               # o agente de triagem
 ```
 
+## Trusted ingestion
+
+Um documento **não entra no índice só porque diz que pode**. Antes de qualquer parsing
+contar, a aplicação decide se a **origem** está autorizada: uma allowlist de source roots
+em `app/provenance.py` (hoje, `knowledge_base/`), resolvida com `Path.resolve()` e
+containment real — `../`, symlink para fora e diretório irmão com nome parecido não passam.
+
+Front matter **não concede confiança**: `status: published` e `tenant: fcai` são conteúdo
+escrito pelo autor do arquivo, não prova de autorização. A metadata de provenance
+(`provenance_trusted`, `provenance_source`, `provenance_policy`) é atribuída pela
+aplicação, e um documento que tenta declará-la é **recusado**, não corrigido em silêncio.
+Origens não autorizadas são rejeitadas **antes da indexação**. O indexador ainda recusa
+chunk sem a marca, mas isso pega `chunks.jsonl` desatualizado — não é fronteira: quem
+escreve o arquivo escreve a marca. A decisão real acontece no caminho, antes.
+
+Isso responde *"esta origem está autorizada?"*, **não** *"este conteúdo é seguro?"*. Uma
+origem autorizada ainda pode ser comprometida ou publicar conteúdo malicioso — ver SEC-002
+em [docs/security-threat-model.md](docs/security-threat-model.md).
+
 ## O que este repositório é
 
 Um pipeline de RAG que funciona, e **sete camadas de avaliação em cima dele**. O código do
@@ -107,8 +126,11 @@ caso aplicável, e o gate as reporta como `MISSING`.
 medem sistemas e propriedades diferentes. Duas atacam a **Input Boundary** (a mensagem do
 usuário é hostil): o **Knowledge Chat** mede resposta e task scope; o **Support Agent** mede
 tools, argumentos, trajetória e side effects (o blast radius é maior). A terceira ataca a
-**Data / Context Boundary**: a pergunta é legítima e o ataque entra por **documento**. Perfil
-`baseline-no-new-guardrails`, sem mitigação nova.
+**Data / Context Boundary**: a pergunta é legítima e o ataque entra por **documento**.
+
+As duas primeiras rodam sob `baseline-no-new-guardrails`, sem mitigação nova. A terceira já
+teve o **primeiro ciclo before/after** do módulo: mesmo dataset, mesmas perguntas, e o
+perfil mudou para `trusted-ingestion-v1`.
 
 ### Knowledge Chat direct-input baseline
 
@@ -171,7 +193,11 @@ normal nunca recebe poison e nunca é limpa: uma allowlist de nome aborta a exec
 alvo não for a collection de segurança. Cada estágio é pontuado **separadamente** — aceito →
 indexado → recuperado → selecionado → usado como fonte → resposta influenciada — porque
 recuperar conteúdo adversarial (diagnostic) não é o mesmo que ele influenciar a resposta
-(blocking). Detalhes e resultados em
+(blocking).
+
+O **mesmo dataset** roda antes e depois do controle; só o `security_controls_profile` muda.
+`baseline-no-new-guardrails` → **3/10** resistidos (faixa 3–5/10 em seis execuções).
+`trusted-ingestion-v1` → **10/10**. Detalhes em
 [docs/security-threat-model.md](docs/security-threat-model.md).
 
 ```bash
@@ -181,6 +207,9 @@ python -m app.eval_security_rag --sync                  # sincroniza o dataset c
 python -m app.eval_security_rag                         # prepara e roda os ataques
 python -m app.eval_security_rag --case-id sec_rag_002   # um caso; --limit N para um subconjunto
 ```
+
+O `--prepare` mostra, por documento, `structural: valid` ao lado de `provenance: untrusted`
+— um documento pode ser perfeitamente válido e ainda assim recusado.
 
 Dataset: `evals/security_rag_poisoning.jsonl`. Fixtures: `evals/security_rag_fixtures/`.
 Relatórios: `data/eval_runs/`.
@@ -223,6 +252,7 @@ app/
 
   eval_security.py           # ataques de entrada direta contra o Knowledge Chat
   eval_security_agent.py     # ataques de entrada direta contra o agente
+  provenance.py              # quais origens podem fornecer conhecimento
   eval_security_rag.py       # documentos envenenados numa collection isolada
 
 evals/                       # os datasets, as sondas de calibração e os thresholds
