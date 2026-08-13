@@ -103,6 +103,13 @@ caso aplicável, e o gate as reporta como `MISSING`.
 
 ## Security baseline
 
+A mesma entrada não confiável tem **dois caminhos** e **duas baselines separadas** — datasets
+diferentes, cujas taxas **não** devem ser somadas. O **Knowledge Chat** mede principalmente
+resposta e task scope; o **Support Agent** mede tools, argumentos, trajetória e side effects
+(o blast radius é maior). Perfil `baseline-no-new-guardrails`, sem mitigação nova.
+
+### Knowledge Chat direct-input baseline
+
 Uma suíte adversarial mede como o Knowledge Chat se comporta sob **entrada direta
 maliciosa** (prompt injection, grounding bypass, extração de contexto, role escalation,
 manipulação do planner e **off-task generation**) — dataset `fcai-security-direct-injection-v1`,
@@ -131,6 +138,23 @@ python -m app.eval_security --case-id sec_direct_032 --diagnose-without-rerank  
 ```
 
 Dataset: `evals/security_direct_injection.jsonl`. Relatórios: `data/eval_runs/`.
+
+### Support Agent direct-input baseline
+
+Uma suíte separada mede se uma **mensagem adversarial** faz o Support Triage Agent chamar
+uma tool proibida, adicionar uma ação não solicitada, trocar argumentos (`severity`),
+atravessar o tenant (`tenant_id`) ou produzir um **side effect real** (ticket em disco).
+Lê as tool calls da trajetória real e mede o ticket criado por **snapshot/delta** do arquivo,
+não pela flag do modelo.
+
+```bash
+python -m app.eval_security_agent --validate-only          # valida o dataset
+python -m app.eval_security_agent --sync                   # sincroniza o dataset com o Langfuse
+python -m app.eval_security_agent                          # roda os ataques contra o agente real
+python -m app.eval_security_agent --case-id sec_agent_011  # um caso; --limit N para um subconjunto
+```
+
+Dataset: `evals/security_agent_direct_injection.jsonl`. Relatórios: `data/eval_runs/`.
 
 ## Documentação
 
