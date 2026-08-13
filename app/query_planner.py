@@ -13,6 +13,7 @@ from langchain_core.documents import Document
 from langchain_core.prompt_values import PromptValue
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVectorStore
+from psycopg import sql
 from pydantic import BaseModel, Field
 
 from app.db import get_connection
@@ -108,15 +109,16 @@ def build_planner_prompt(question: str) -> PromptValue:
     return PLANNER_PROMPT.invoke({"question": question})
 
 
-def ensure_planner_covers_index() -> None:
+def ensure_planner_covers_index(*, table_name: str = TABLE_NAME) -> None:
     # DocType and Plan are a contract with the index: a value the planner cannot
     # produce never passes the filter, so its documents silently vanish from every
     # filtered search. Check the contract at startup and fail loudly instead.
+    query = sql.SQL(
+        "SELECT DISTINCT langchain_metadata->>'doc_type', "
+        "langchain_metadata->>'plan' FROM {}"
+    ).format(sql.Identifier(table_name))
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT langchain_metadata->>'doc_type', "
-            f"langchain_metadata->>'plan' FROM {TABLE_NAME}"
-        ).fetchall()
+        rows = conn.execute(query).fetchall()
 
     unknown = {doc_type for doc_type, _ in rows} - set(get_args(DocType))
     unknown |= {plan for _, plan in rows} - {ALL_PLANS, *get_args(Plan)}

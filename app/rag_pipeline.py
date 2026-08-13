@@ -30,6 +30,7 @@ from app.governance import (
     load_policy,
     record_usage,
 )
+from app.index import TABLE_NAME
 from app.query_planner import (
     SAFE_FILTERS,
     QueryPlan,
@@ -270,11 +271,14 @@ def build_sources(documents: list[Document], used_chunk_ids: list[str]) -> list[
 
 
 class RagPipeline:
-    def __init__(self) -> None:
+    # table_name is the collection this pipeline reads from. Production never passes it;
+    # a security evaluation points the same pipeline at an isolated collection instead of
+    # building a second, fake RAG to attack.
+    def __init__(self, *, table_name: str = TABLE_NAME) -> None:
         observability.setup_tracing()
-        ensure_collection_ready()
-        ensure_planner_covers_index()
-        self.store = connect_store()
+        ensure_collection_ready(table_name=table_name)
+        ensure_planner_covers_index(table_name=table_name)
+        self.store = connect_store(table_name=table_name)
 
         # temperature=0: the planner is a classifier, and the same question must always
         # produce the same plan. With the default temperature it flip-flopped between

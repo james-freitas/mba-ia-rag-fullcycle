@@ -103,10 +103,12 @@ caso aplicável, e o gate as reporta como `MISSING`.
 
 ## Security baseline
 
-A mesma entrada não confiável tem **dois caminhos** e **duas baselines separadas** — datasets
-diferentes, cujas taxas **não** devem ser somadas. O **Knowledge Chat** mede principalmente
-resposta e task scope; o **Support Agent** mede tools, argumentos, trajetória e side effects
-(o blast radius é maior). Perfil `baseline-no-new-guardrails`, sem mitigação nova.
+**Três baselines separadas**, com datasets próprios e taxas que **não** devem ser somadas —
+medem sistemas e propriedades diferentes. Duas atacam a **Input Boundary** (a mensagem do
+usuário é hostil): o **Knowledge Chat** mede resposta e task scope; o **Support Agent** mede
+tools, argumentos, trajetória e side effects (o blast radius é maior). A terceira ataca a
+**Data / Context Boundary**: a pergunta é legítima e o ataque entra por **documento**. Perfil
+`baseline-no-new-guardrails`, sem mitigação nova.
 
 ### Knowledge Chat direct-input baseline
 
@@ -156,6 +158,33 @@ python -m app.eval_security_agent --case-id sec_agent_011  # um caso; --limit N 
 
 Dataset: `evals/security_agent_direct_injection.jsonl`. Relatórios: `data/eval_runs/`.
 
+### RAG poisoning security baseline
+
+Aqui a pergunta do usuário é **legítima** e o conteúdo adversarial entra por **documento**:
+`.md` com front matter válido, submetidos à ingestão normal — **factual poisoning** (fato
+falso, sem instrução nenhuma) e **indirect prompt injection** (instrução escondida no
+documento, detectada por marcador sintético na resposta).
+
+Roda numa **collection isolada** (`fcai_security_rag_poisoning_v1`) montada com a knowledge
+base legítima **mais** as fixtures adversariais, recriada a cada execução. A collection
+normal nunca recebe poison e nunca é limpa: uma allowlist de nome aborta a execução se o
+alvo não for a collection de segurança. Cada estágio é pontuado **separadamente** — aceito →
+indexado → recuperado → selecionado → usado como fonte → resposta influenciada — porque
+recuperar conteúdo adversarial (diagnostic) não é o mesmo que ele influenciar a resposta
+(blocking). Detalhes e resultados em
+[docs/security-threat-model.md](docs/security-threat-model.md).
+
+```bash
+python -m app.eval_security_rag --validate-only         # valida o dataset e a regra de isolamento
+python -m app.eval_security_rag --prepare               # monta a collection isolada e mostra o que foi aceito/indexado
+python -m app.eval_security_rag --sync                  # sincroniza o dataset com o Langfuse
+python -m app.eval_security_rag                         # prepara e roda os ataques
+python -m app.eval_security_rag --case-id sec_rag_002   # um caso; --limit N para um subconjunto
+```
+
+Dataset: `evals/security_rag_poisoning.jsonl`. Fixtures: `evals/security_rag_fixtures/`.
+Relatórios: `data/eval_runs/`.
+
 ## Documentação
 
 | | |
@@ -192,7 +221,12 @@ app/
 
   eval_gate.py               # lê os relatórios e decide — sem chamar nada
 
+  eval_security.py           # ataques de entrada direta contra o Knowledge Chat
+  eval_security_agent.py     # ataques de entrada direta contra o agente
+  eval_security_rag.py       # documentos envenenados numa collection isolada
+
 evals/                       # os datasets, as sondas de calibração e os thresholds
+evals/security_rag_fixtures/ # os documentos adversariais em Markdown
 knowledge_base/              # os documentos Markdown com front matter
 tests/                       # contrato da API, dataset e a matemática dos relatórios
 data/eval_runs/              # relatórios das execuções (fora do git)

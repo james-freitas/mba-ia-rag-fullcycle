@@ -5,6 +5,7 @@ import psycopg
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_postgres import PGEngine, PGVectorStore
+from psycopg import sql
 
 from app.config import settings
 from app.db import get_connection
@@ -27,23 +28,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def ensure_collection_ready() -> None:
+def ensure_collection_ready(*, table_name: str = TABLE_NAME) -> None:
+    # Identifier(), not an f-string: the collection name is a parameter now, and quoting it
+    # here keeps that safe at the SQL itself instead of relying on every caller to validate.
+    query = sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table_name))
     try:
         with get_connection() as conn:
-            count = conn.execute(f"SELECT count(*) FROM {TABLE_NAME}").fetchone()[0]
+            count = conn.execute(query).fetchone()[0]
     except psycopg.errors.UndefinedTable:
         count = 0
 
     if not count:
         print(
-            f"Collection '{TABLE_NAME}' is missing or empty. "
+            f"Collection '{table_name}' is missing or empty. "
             "Run 'python -m app.ingest' and then 'python -m app.index' first.",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
 
-def connect_store() -> PGVectorStore:
+def connect_store(*, table_name: str = TABLE_NAME) -> PGVectorStore:
     embeddings = OpenAIEmbeddings(
         model=settings.openai_embedding_model,
         api_key=settings.openai_api_key,
@@ -52,7 +56,7 @@ def connect_store() -> PGVectorStore:
     return PGVectorStore.create_sync(
         engine=engine,
         embedding_service=embeddings,
-        table_name=TABLE_NAME,
+        table_name=table_name,
         id_column=ID_COLUMN["name"],
     )
 

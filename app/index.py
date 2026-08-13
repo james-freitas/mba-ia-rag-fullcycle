@@ -90,14 +90,16 @@ def table_exists() -> bool:
     return row[0] is not None
 
 
-def connect_store(embeddings: OpenAIEmbeddings, create_table: bool) -> PGVectorStore:
+def connect_store(
+    embeddings: OpenAIEmbeddings, create_table: bool, *, table_name: str = TABLE_NAME
+) -> PGVectorStore:
     engine = PGEngine.from_connection_string(url=settings.database_url)
     if create_table:
         # The table column size must match the embedding model, so ask the
         # model for one embedding to learn its vector dimension.
         vector_size = len(embeddings.embed_query("dimension probe"))
         engine.init_vectorstore_table(
-            table_name=TABLE_NAME,
+            table_name=table_name,
             vector_size=vector_size,
             id_column=ID_COLUMN,
             overwrite_existing=True,
@@ -105,7 +107,7 @@ def connect_store(embeddings: OpenAIEmbeddings, create_table: bool) -> PGVectorS
     return PGVectorStore.create_sync(
         engine=engine,
         embedding_service=embeddings,
-        table_name=TABLE_NAME,
+        table_name=table_name,
         id_column=ID_COLUMN["name"],
     )
 
