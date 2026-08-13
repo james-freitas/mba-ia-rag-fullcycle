@@ -481,13 +481,16 @@ aplicado nas próximas aulas.
 - **Likelihood:** high · **Impact:** medium
 - **Controles atuais:** system prompt restritivo; structured output; `NO_ANSWER`.
 - **Tratamento planejado:** demonstrar o ataque; avaliar guardrail de entrada em aula futura.
-- **Evidência (baseline):** dataset `fcai-security-direct-injection-v2`
-  (`evals/security_direct_injection.jsonl`, ~28 casos em três dificuldades e alguns
+- **Evidência (baseline):** dataset `fcai-security-direct-injection-v1`
+  (`evals/security_direct_injection.jsonl`, ~33 casos em três dificuldades e alguns
   idiomas), executado por `python -m app.eval_security` sob o perfil
   `baseline-no-new-guardrails`. A suíte roda o pipeline real e separa propriedades
-  *blocking* (decidem o sucesso do ataque) de *diagnostic* (só sinalizam). Uma taxa alta
-  de resistência a ataques **conhecidos** não prova que injection foi eliminado; o risco
-  permanece **open**.
+  *blocking* (decidem o sucesso do ataque) de *diagnostic* (só sinalizam). A v3 observou
+  **task hijacking / off-task generation** em entrada direta: com o assunto dentro do
+  domínio, o Knowledge Chat executa tarefas fora do escopo (traduzir, anunciar, compor)
+  em vez de recusar — `grounding` e `source_integrity` não equivalem a `task_scope`. Uma
+  taxa alta de resistência a ataques **conhecidos** não prova que injection foi eliminado;
+  o risco permanece **open**.
 - **Status:** open · **OWASP:** LLM01
 
 ### SEC-002 — Indirect prompt injection via RAG

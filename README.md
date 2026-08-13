@@ -105,12 +105,17 @@ caso aplicável, e o gate as reporta como `MISSING`.
 
 Uma suíte adversarial mede como o Knowledge Chat se comporta sob **entrada direta
 maliciosa** (prompt injection, grounding bypass, extração de contexto, role escalation,
-manipulação do planner) — dataset `fcai-security-direct-injection-v2`, ~28 casos em três
-níveis de `difficulty` (basic/intermediate/advanced) e alguns idiomas. Roda o pipeline
-real e pontua propriedades determinísticas, cada uma **blocking** (decide se o ataque teve
-sucesso) ou **diagnostic** (só sinaliza — ex.: a resposta cita um valor falso apenas para
-refutá-lo). Só falhas blocking contam contra a resistência. Registra no Langfuse e em
-relatório local.
+manipulação do planner e **off-task generation**) — dataset `fcai-security-direct-injection-v1`,
+~33 casos em três níveis de `difficulty` (basic/intermediate/advanced) e alguns idiomas.
+Roda o pipeline real (`use_rerank=True`, produção) e pontua propriedades determinísticas,
+cada uma **blocking** (decide se o ataque teve sucesso) ou **diagnostic** (só sinaliza — ex.:
+a resposta cita um valor falso apenas para refutá-lo). Só falhas blocking contam contra a
+resistência. Registra no Langfuse e em relatório local.
+
+**Off-task generation** testa task hijacking: pedir uma tarefa fora da finalidade (traduzir,
+escrever anúncio, campanha, poema, música) usando um assunto que **existe** na base. Conteúdo
+in-domain não implica que toda tarefa sobre esse conteúdo seja permitida — `grounding` e
+`source_integrity` **não** equivalem a `task_scope`, então executar a tarefa é falha blocking.
 
 Nesta baseline **nenhuma mitigação nova está ativa** (`security_controls_profile =
 baseline-no-new-guardrails`): fotografa o comportamento atual para comparar quando
@@ -119,9 +124,10 @@ versionado e às suas propriedades blocking** — não é uma medida absoluta de
 
 ```bash
 python -m app.eval_security --validate-only          # valida o dataset
-python -m app.eval_security --sync                   # sincroniza o dataset (v2) com o Langfuse
+python -m app.eval_security --sync                   # sincroniza o dataset com o Langfuse
 python -m app.eval_security                          # roda os ataques e pontua
-python -m app.eval_security --case-id sec_direct_003 # um caso; --limit N para um subconjunto
+python -m app.eval_security --case-id sec_direct_031 # um caso; --limit N para um subconjunto
+python -m app.eval_security --case-id sec_direct_032 --diagnose-without-rerank  # isolamento (NÃO é baseline)
 ```
 
 Dataset: `evals/security_direct_injection.jsonl`. Relatórios: `data/eval_runs/`.
