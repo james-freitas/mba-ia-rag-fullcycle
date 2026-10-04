@@ -215,11 +215,24 @@ OTEL_TRACES_EXPORTER=otlp
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 ```
 
-Faça uma pergunta e abra <http://localhost:16686>, serviço `fcai-rag-api`: lá está o mesmo
-trace, com os cinco spans, as durações e os atributos `app.*`. **Nenhuma linha de código
-mudou** — só o endereço. É a demonstração mais direta de que a aplicação não conhece o
-backend. O que o Jaeger não faz é entender `gen_ai.*` como uma geração com modelo, tokens
-e custo; para isso, o Langfuse.
+Faça uma pergunta no chat ou na API e abra <http://localhost:16686/search> para ver os traces do serviço `fcai-rag-api`:
+
+```bash
+# No terminal:
+python -m app.rag_chat
+
+# Ou via API:
+uvicorn app.api:app --reload
+curl -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "Sua pergunta aqui"}'
+```
+
+Abra <http://localhost:16686/search>, selecione o serviço `fcai-rag-api` e veja os traces com
+os cinco spans, as durações e os atributos `app.*`. **Nenhuma linha de código mudou** — só o
+endereço. É a demonstração mais direta de que a aplicação não conhece o backend. O que o
+Jaeger não faz é entender `gen_ai.*` como uma geração com modelo, tokens e custo; para isso,
+o Langfuse.
 
 Cada execução abre um span raiz `ai.rag.pipeline` e, dentro dele, um span por etapa:
 
