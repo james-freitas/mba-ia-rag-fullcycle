@@ -162,6 +162,37 @@ Toda execução do pipeline recebe um `request_id` (UUID), mede o tempo de cada 
 soma os tokens consumidos por modelo (via `UsageMetadataCallbackHandler` do LangChain —
 tokens, não custo: o LangChain não fornece preços).
 
+### Configuração rápida
+
+Para habilitar a observabilidade, adicione ao `.env`:
+
+```bash
+OBSERVABILITY_ENABLED=true
+OTEL_SERVICE_NAME=fcai-rag-api
+OTEL_TRACES_EXPORTER=otlp
+```
+
+**Com Jaeger** (um container, mais leve):
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+# Suba o Jaeger com: docker compose --profile jaeger up -d
+```
+
+**Com Langfuse** (seis containers, mais detalhado):
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+LANGFUSE_PUBLIC_KEY=pk-lf-fcai-rag-local
+LANGFUSE_SECRET_KEY=sk-lf-fcai-rag-local
+LANGFUSE_HOST=http://localhost:3000
+# Suba o Langfuse com: docker compose --profile observability up -d
+```
+
+Ambas exportam para OTLP no mesmo endpoint (`http://localhost:4318`) — o backend muda
+apenas a autenticação e o host. Para o **Langfuse Cloud**, troque `LANGFUSE_HOST` por
+`https://cloud.langfuse.com` e use as chaves do seu projeto (Settings → API Keys).
+
 - **Log estruturado**: cada execução emite uma linha JSON no stdout com `request_id`,
   se houve resposta, se pediu esclarecimento, contagens de chunks, os arquivos usados
   como fonte, os tempos e os tokens. Só isso: nada de prompt, conteúdo de chunk,
@@ -318,10 +349,11 @@ curl -X POST http://127.0.0.1:8000/chat \
   -d '{"question": "Qual é o SLA para incidentes P1 no plano Enterprise?"}'
 ```
 
-No Langfuse, abra **Tracing → Traces**: cada requisição é um trace `ai.rag.pipeline` com
-os spans das etapas dentro (query planning, retrieval, reranking, answer generation),
-cada um com seus tempos e atributos. Filtre por `app.request_id` para chegar em uma
-execução específica — é o mesmo id que aparece no log JSON e no `--debug`.
+Após fazer o prompt, abra o **Langfuse em `http://localhost:3000`** (entre com `admin@fcai.local` / 
+`langfuse123` se for a instância local do docker-compose). Acesse **Tracing → Traces**: cada 
+requisição é um trace `ai.rag.pipeline` com os spans das etapas dentro (query planning, retrieval, 
+reranking, answer generation), cada um com seus tempos e atributos. Filtre por `app.request_id` 
+para chegar em uma execução específica — é o mesmo id que aparece no log JSON e no `--debug`.
 
 Repare em um detalhe: o `ai.rag.answer_generation` chega classificado como **generation**,
 com o modelo e os tokens preenchidos, enquanto os outros são spans comuns. Ninguém disse
