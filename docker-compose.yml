@@ -19,7 +19,6 @@ services:
   # Jaeger: o backend OTLP mais leve possível, um container só. Os mesmos spans do
   # pipeline, sem trocar uma linha de código — só o endpoint.
   jaeger:
-    profiles: ["jaeger"]
     image: docker.io/jaegertracing/all-in-one:latest
     container_name: fc-jaeger
     restart: unless-stopped
@@ -35,7 +34,6 @@ services:
   # Langfuse: o backend que recebe os traces OTLP da aplicação. As credenciais abaixo
   # são de desenvolvimento local — em produção, todas mudam.
   langfuse-web:
-    profiles: ["observability"]
     image: docker.io/langfuse/langfuse:4
     container_name: fc-langfuse-web
     restart: unless-stopped
@@ -88,7 +86,6 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: langfuse123
 
   langfuse-worker:
-    profiles: ["observability"]
     image: docker.io/langfuse/langfuse-worker:4
     container_name: fc-langfuse-worker
     restart: unless-stopped
@@ -97,7 +94,6 @@ services:
       <<: *langfuse-env
 
   langfuse-postgres:
-    profiles: ["observability"]
     image: docker.io/postgres:17
     container_name: fc-langfuse-postgres
     restart: unless-stopped
@@ -114,7 +110,6 @@ services:
       retries: 10
 
   langfuse-clickhouse:
-    profiles: ["observability"]
     image: docker.io/clickhouse/clickhouse-server:25.12
     container_name: fc-langfuse-clickhouse
     restart: unless-stopped
@@ -125,9 +120,6 @@ services:
       CLICKHOUSE_PASSWORD: clickhouse
     volumes:
       - langfuse_clickhouse_data:/var/lib/clickhouse
-      # Sem isto o profiling interno do ClickHouse enche o disco da VM do Docker em
-      # cerca de um dia, e aí o MinIO passa a recusar traces e scores com HTTP 500.
-      - ./clickhouse-logs-off.xml:/etc/clickhouse-server/config.d/logs-off.xml:ro
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
@@ -135,7 +127,6 @@ services:
       retries: 10
 
   langfuse-redis:
-    profiles: ["observability"]
     image: docker.io/redis:7
     container_name: fc-langfuse-redis
     restart: unless-stopped
@@ -149,8 +140,7 @@ services:
       retries: 10
 
   langfuse-minio:
-    profiles: ["observability"]
-    image: docker.io/minio/minio
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     container_name: fc-langfuse-minio
     restart: unless-stopped
     entrypoint: sh
